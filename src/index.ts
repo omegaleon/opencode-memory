@@ -2,6 +2,7 @@ import type { Plugin } from "@opencode-ai/plugin"
 import { createContextUsageTool } from "./tools/context-usage.js"
 import { createMemoryRecallTool } from "./tools/memory-recall.js"
 import { createMemorySaveTool } from "./tools/memory-save.js"
+import { createMemorySeedTool } from "./tools/memory-seed.js"
 import { createCompactionHook } from "./hooks/compaction.js"
 import { createEventHook, type SessionTracker } from "./hooks/events.js"
 import { createSystemHook } from "./hooks/system.js"
@@ -21,6 +22,7 @@ export const MemoryPlugin: Plugin = async ({ client, directory }) => {
       context_usage: createContextUsageTool(client),
       memory_recall: createMemoryRecallTool(),
       memory_save: createMemorySaveTool(client, directory),
+      memory_seed: createMemorySeedTool(),
     },
 
     // Event tracking + auto-save every ~10K tokens
