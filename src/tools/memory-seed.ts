@@ -60,7 +60,7 @@ interface ProjectInfo {
 function findProjects(rootPath: string, maxDepth: number): string[] {
   const results: string[] = []
 
-  function walk(dir: string, depth: number) {
+  function walk(dir: string, depth: number, isRoot: boolean = false) {
     if (depth > maxDepth) return
 
     try {
@@ -71,15 +71,13 @@ function findProjects(rootPath: string, maxDepth: number): string[] {
         entries.some((e) => e.name === marker)
       )
 
-      if (isProject) {
+      if (isProject && !isRoot) {
+        // Non-root project: add it and only recurse into monorepo dirs
         results.push(dir)
-        // Don't recurse into subprojects (monorepo packages are separate)
-        // But do check one level deeper for monorepos
         if (depth < maxDepth) {
           for (const entry of entries) {
             if (!entry.isDirectory()) continue
             if (SKIP_DIRS.has(entry.name)) continue
-            // Only recurse into common monorepo patterns
             if (
               entry.name === "packages" ||
               entry.name === "apps" ||
@@ -93,7 +91,8 @@ function findProjects(rootPath: string, maxDepth: number): string[] {
         return
       }
 
-      // Not a project, keep walking
+      // Root dir or non-project: always recurse into all child directories
+      // (If root is also a project, skip adding it — it's a container, not a real project)
       for (const entry of entries) {
         if (!entry.isDirectory()) continue
         if (SKIP_DIRS.has(entry.name)) continue
@@ -105,7 +104,7 @@ function findProjects(rootPath: string, maxDepth: number): string[] {
     }
   }
 
-  walk(rootPath, 0)
+  walk(rootPath, 0, true)
   return results
 }
 
