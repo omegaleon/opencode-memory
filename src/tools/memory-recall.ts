@@ -1,4 +1,5 @@
 import { tool } from "@opencode-ai/plugin/tool"
+import { existsSync } from "node:fs"
 import {
   readIndex,
   parseIndexEntries,
@@ -39,6 +40,28 @@ export function createMemoryRecallTool() {
 
         if (!entry) {
           return `No session found matching ID: ${args.session_id}`
+        }
+
+        // Check if local session file still exists
+        if (!existsSync(entry.sessionFilePath)) {
+          // Fallback: return what we have from the global index
+          const lines = [
+            `WARNING: Session file not found at: ${entry.sessionFilePath}`,
+            `The project may have been moved or deleted.`,
+            ``,
+            `Returning data from global memory index:`,
+            ``,
+            `Date: ${entry.date}`,
+            `Session: ${entry.sessionID}`,
+            `Project: ${entry.project}`,
+            `Summary: ${entry.summary}`,
+            `Key Topics: ${entry.keyTopics}`,
+            `Decisions: ${entry.decisions}`,
+          ]
+          if (entry.unfinished) {
+            lines.push(`Unfinished: ${entry.unfinished}`)
+          }
+          return lines.join("\n")
         }
 
         const content = readSessionFile(entry.sessionFilePath)
@@ -97,12 +120,17 @@ function formatResults(entries: ReturnType<typeof parseIndexEntries>): string {
   const lines = [`Found ${entries.length} matching session(s):\n`]
 
   for (const entry of entries) {
+    const fileExists = existsSync(entry.sessionFilePath)
     lines.push(`--- ${entry.date} | Session ${entry.sessionID} | ${entry.project}`)
     lines.push(`Summary: ${entry.summary}`)
     lines.push(`Topics: ${entry.keyTopics}`)
     if (entry.decisions) lines.push(`Decisions: ${entry.decisions}`)
     if (entry.unfinished) lines.push(`Unfinished: ${entry.unfinished}`)
-    lines.push(`Full detail: call memory_recall with session_id="${entry.sessionID}"`)
+    if (fileExists) {
+      lines.push(`Full detail: call memory_recall with session_id="${entry.sessionID}"`)
+    } else {
+      lines.push(`[Session file missing — this is all available data for this session]`)
+    }
     lines.push("")
   }
 
