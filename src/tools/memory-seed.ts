@@ -2,17 +2,62 @@ import { tool } from "@opencode-ai/plugin/tool"
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs"
 import { join, basename } from "node:path"
 import {
+  writeIndexEntry,
   readIndex,
   parseIndexEntries,
-  writeIndexEntry,
   type MemoryEntry,
 } from "../lib/storage.js"
 
+/** Markers that identify a directory as a project root */
+const PROJECT_MARKERS = [
+  ".git",
+  "package.json",
+  "pyproject.toml",
+  "Cargo.toml",
+  "go.mod",
+  "Makefile",
+  "docker-compose.yml",
+  "docker-compose.yaml",
+  "Dockerfile",
+  "pom.xml",
+  "build.gradle",
+  "Gemfile",
+  "mix.exs",
+  "CMakeLists.txt",
+  "setup.py",
+  "setup.cfg",
+]
+
+/** Skip these directories when walking */
+const SKIP_DIRS = new Set([
+  "node_modules",
+  ".git",
+  "__pycache__",
+  ".venv",
+  "venv",
+  "dist",
+  "build",
+  ".next",
+  ".nuxt",
+  "target",
+  "vendor",
+  ".cache",
+  ".opencode",
+])
+
+interface ProjectInfo {
+  path: string
+  name: string
+  summary: string
+  topics: string[]
+  languages: string[]
+  frameworks: string[]
+}
+
 /**
- * Recursively find all .opencode/memory/sessions/ directories under a root path.
- * Returns the project directory (parent of .opencode/) for each found.
+ * Find project directories under a root path.
  */
-function findMemoryDirs(rootPath: string, maxDepth: number = 5): string[] {
+function findProjects(rootPath: string, maxDepth: number): string[] {
   const results: string[] = []
 
   function walk(dir: string, depth: number) {
@@ -20,23 +65,43 @@ function findMemoryDirs(rootPath: string, maxDepth: number = 5): string[] {
 
     try {
       const entries = readdirSync(dir, { withFileTypes: true })
+
+      // Check if this directory is a project
+      const isProject = PROJECT_MARKERS.some((marker) =>
+        entries.some((e) => e.name === marker)
+      )
+
+      if (isProject) {
+        results.push(dir)
+        // Don't recurse into subprojects (monorepo packages are separate)
+        // But do check one level deeper for monorepos
+        if (depth < maxDepth) {
+          for (const entry of entries) {
+            if (!entry.isDirectory()) continue
+            if (SKIP_DIRS.has(entry.name)) continue
+            // Only recurse into common monorepo patterns
+            if (
+              entry.name === "packages" ||
+              entry.name === "apps" ||
+              entry.name === "services" ||
+              entry.name === "libs"
+            ) {
+              walk(join(dir, entry.name), depth + 1)
+            }
+          }
+        }
+        return
+      }
+
+      // Not a project, keep walking
       for (const entry of entries) {
         if (!entry.isDirectory()) continue
-        if (entry.name === "node_modules" || entry.name === ".git") continue
-
-        const fullPath = join(dir, entry.name)
-
-        if (entry.name === ".opencode") {
-          const sessionsDir = join(fullPath, "memory", "sessions")
-          if (existsSync(sessionsDir)) {
-            results.push(dir) // the project dir is the parent of .opencode
-          }
-        } else {
-          walk(fullPath, depth + 1)
-        }
+        if (SKIP_DIRS.has(entry.name)) continue
+        if (entry.name.startsWith(".")) continue
+        walk(join(dir, entry.name), depth + 1)
       }
     } catch {
-      // Permission denied or similar — skip
+      // Permission denied — skip
     }
   }
 
@@ -45,64 +110,199 @@ function findMemoryDirs(rootPath: string, maxDepth: number = 5): string[] {
 }
 
 /**
- * Parse a session markdown file to extract metadata for the global index.
+ * Read a file safely, return empty string on failure.
  */
-function parseSessionFile(
-  filePath: string,
-  projectDir: string
-): MemoryEntry | null {
+function safeRead(filePath: string, maxBytes: number = 4096): string {
   try {
-    const content = readFileSync(filePath, "utf-8")
-    const fileName = basename(filePath, ".md")
-
-    // Extract date and session ID from filename: YYYY-MM-DD_sessionID
-    const fileMatch = fileName.match(/^(\d{4}-\d{2}-\d{2})_(.+)$/)
-    if (!fileMatch) return null
-
-    const [, date, sessionID] = fileMatch
-
-    // Extract fields from the markdown content
-    const summaryMatch = content.match(/## Summary\n([\s\S]*?)(?=\n## |\n*$)/)
-    const topicsMatch = content.match(/## Key Topics\n([\s\S]*?)(?=\n## |\n*$)/)
-    const decisionsMatch = content.match(/## Decisions\n([\s\S]*?)(?=\n## |\n*$)/)
-    const unfinishedMatch = content.match(
-      /## Unfinished[^\n]*\n([\s\S]*?)(?=\n## |\n*$)/
-    )
-
-    // Collapse multi-line content to single line for the index
-    const collapse = (text: string | undefined): string => {
-      if (!text) return ""
-      return text.trim().replace(/\n/g, " ").slice(0, 500)
+    if (!existsSync(filePath)) return ""
+    const stat = statSync(filePath)
+    if (stat.size > maxBytes * 2) {
+      // Read only the beginning for large files
+      const buf = Buffer.alloc(maxBytes)
+      const fd = require("node:fs").openSync(filePath, "r")
+      require("node:fs").readSync(fd, buf, 0, maxBytes, 0)
+      require("node:fs").closeSync(fd)
+      return buf.toString("utf-8")
     }
-
-    return {
-      date: date!,
-      sessionID: sessionID!,
-      project: projectDir,
-      summary: collapse(summaryMatch?.[1]) || "Auto-seeded from existing session file",
-      keyTopics: collapse(topicsMatch?.[1]) || "",
-      decisions: collapse(decisionsMatch?.[1]) || "",
-      unfinished: collapse(unfinishedMatch?.[1]) || undefined,
-      sessionFilePath: filePath,
-    }
+    return readFileSync(filePath, "utf-8")
   } catch {
-    return null
+    return ""
+  }
+}
+
+/**
+ * Analyze a project directory and extract key information.
+ */
+function analyzeProject(projectDir: string): ProjectInfo {
+  const name = basename(projectDir)
+  const languages: string[] = []
+  const frameworks: string[] = []
+  const topics: string[] = []
+  const summaryParts: string[] = []
+
+  // Read package.json
+  const pkgJson = safeRead(join(projectDir, "package.json"))
+  if (pkgJson) {
+    try {
+      const pkg = JSON.parse(pkgJson)
+      languages.push("JavaScript/TypeScript")
+      if (pkg.description) summaryParts.push(pkg.description)
+
+      const allDeps = {
+        ...pkg.dependencies,
+        ...pkg.devDependencies,
+      }
+      // Detect frameworks from dependencies
+      if (allDeps?.react) frameworks.push("React")
+      if (allDeps?.next) frameworks.push("Next.js")
+      if (allDeps?.vue) frameworks.push("Vue")
+      if (allDeps?.nuxt) frameworks.push("Nuxt")
+      if (allDeps?.svelte) frameworks.push("Svelte")
+      if (allDeps?.express) frameworks.push("Express")
+      if (allDeps?.fastify) frameworks.push("Fastify")
+      if (allDeps?.nestjs || allDeps?.["@nestjs/core"]) frameworks.push("NestJS")
+      if (allDeps?.electron) frameworks.push("Electron")
+      if (allDeps?.typescript) languages.push("TypeScript")
+      if (allDeps?.tailwindcss) frameworks.push("Tailwind")
+      if (allDeps?.prisma || allDeps?.["@prisma/client"]) frameworks.push("Prisma")
+      if (allDeps?.drizzle || allDeps?.["drizzle-orm"]) frameworks.push("Drizzle")
+      if (allDeps?.mongoose) frameworks.push("Mongoose")
+      if (allDeps?.["@opencode-ai/plugin"]) frameworks.push("OpenCode Plugin")
+
+      // Scripts as topic hints
+      if (pkg.scripts) {
+        const scriptNames = Object.keys(pkg.scripts)
+        if (scriptNames.includes("test")) topics.push("tests")
+        if (scriptNames.includes("deploy")) topics.push("deployment")
+        if (scriptNames.includes("lint")) topics.push("linting")
+      }
+    } catch {
+      // Invalid JSON
+    }
+  }
+
+  // Read pyproject.toml / setup.py
+  const pyproject = safeRead(join(projectDir, "pyproject.toml"))
+  if (pyproject) {
+    languages.push("Python")
+    const nameMatch = pyproject.match(/^name\s*=\s*"(.+)"/m)
+    const descMatch = pyproject.match(/^description\s*=\s*"(.+)"/m)
+    if (descMatch) summaryParts.push(descMatch[1]!)
+
+    if (pyproject.includes("django")) frameworks.push("Django")
+    if (pyproject.includes("flask")) frameworks.push("Flask")
+    if (pyproject.includes("fastapi")) frameworks.push("FastAPI")
+    if (pyproject.includes("boto3")) frameworks.push("AWS/boto3")
+    if (pyproject.includes("elasticsearch")) frameworks.push("Elasticsearch")
+    if (pyproject.includes("pandas")) frameworks.push("Pandas")
+    if (pyproject.includes("sqlalchemy")) frameworks.push("SQLAlchemy")
+  }
+
+  const setupPy = safeRead(join(projectDir, "setup.py"))
+  if (setupPy && !languages.includes("Python")) {
+    languages.push("Python")
+  }
+
+  // Read Cargo.toml
+  const cargoToml = safeRead(join(projectDir, "Cargo.toml"))
+  if (cargoToml) {
+    languages.push("Rust")
+    const descMatch = cargoToml.match(/^description\s*=\s*"(.+)"/m)
+    if (descMatch) summaryParts.push(descMatch[1]!)
+  }
+
+  // Read go.mod
+  const goMod = safeRead(join(projectDir, "go.mod"))
+  if (goMod) {
+    languages.push("Go")
+  }
+
+  // Read README (first 2000 chars for summary extraction)
+  const readmeNames = ["README.md", "readme.md", "README", "README.rst", "README.txt"]
+  for (const readmeName of readmeNames) {
+    const readme = safeRead(join(projectDir, readmeName), 2000)
+    if (readme) {
+      // Extract first paragraph as description
+      const firstPara = readme
+        .replace(/^#[^\n]*\n+/, "") // strip title
+        .replace(/^\[.*?\].*\n*/gm, "") // strip badges
+        .replace(/^>\s.*\n*/gm, "") // strip blockquotes
+        .trim()
+        .split(/\n\n/)[0]
+
+      if (firstPara && firstPara.length > 10 && firstPara.length < 500) {
+        summaryParts.push(firstPara.replace(/\n/g, " "))
+      }
+      break
+    }
+  }
+
+  // Check for Docker
+  if (
+    existsSync(join(projectDir, "Dockerfile")) ||
+    existsSync(join(projectDir, "docker-compose.yml")) ||
+    existsSync(join(projectDir, "docker-compose.yaml"))
+  ) {
+    topics.push("Docker")
+  }
+
+  // Check for CI/CD
+  if (existsSync(join(projectDir, ".github", "workflows"))) {
+    topics.push("GitHub Actions")
+  }
+  if (existsSync(join(projectDir, ".gitlab-ci.yml"))) {
+    topics.push("GitLab CI")
+  }
+
+  // Check for Terraform/IaC
+  try {
+    const files = readdirSync(projectDir)
+    if (files.some((f) => f.endsWith(".tf"))) {
+      topics.push("Terraform")
+      languages.push("HCL")
+    }
+  } catch {}
+
+  // Build the directory listing for context
+  try {
+    const topLevel = readdirSync(projectDir)
+      .filter((f) => !f.startsWith(".") && f !== "node_modules")
+      .slice(0, 30)
+    topics.push(...topLevel.filter((f) => {
+      try {
+        return statSync(join(projectDir, f)).isDirectory()
+      } catch { return false }
+    }).map((d) => `dir:${d}`))
+  } catch {}
+
+  // Build summary
+  const summary = summaryParts.length > 0
+    ? summaryParts[0]!
+    : `${languages.join("/")} project`
+
+  return {
+    path: projectDir,
+    name,
+    summary: summary.slice(0, 300),
+    topics: [...new Set(topics)],
+    languages: [...new Set(languages)],
+    frameworks: [...new Set(frameworks)],
   }
 }
 
 export function createMemorySeedTool() {
   return tool({
     description:
-      "One-time seed of the global memory index by scanning a directory tree for existing " +
-      "local session files (.opencode/memory/sessions/). Finds all projects with session " +
-      "data and adds them to the global MEMORY.md index. Safe to run multiple times — " +
-      "existing entries are updated, not duplicated.",
+      "Scan a directory tree for projects and seed the global memory index. " +
+      "Reads each project's package.json, README, pyproject.toml, Cargo.toml, etc. " +
+      "to extract: project name, languages, frameworks, description, and key topics. " +
+      "Creates a memory entry for each project so future sessions can recall them. " +
+      "Safe to run multiple times — existing entries are updated, not duplicated.",
     args: {
       path: tool.schema
         .string()
         .describe(
-          "Root directory to scan for projects with .opencode/memory/sessions/ directories. " +
-          "Example: '/code' or '/home/user'."
+          "Root directory to scan for projects. Example: '/code' or '/home/user/projects'."
         ),
       max_depth: tool.schema
         .number()
@@ -115,65 +315,75 @@ export function createMemorySeedTool() {
         return `Path does not exist: ${scanPath}`
       }
 
-      const projectDirs = findMemoryDirs(scanPath, args.max_depth ?? 5)
+      const projectDirs = findProjects(scanPath, args.max_depth ?? 5)
 
       if (projectDirs.length === 0) {
-        return `No .opencode/memory/sessions/ directories found under: ${scanPath}`
+        return `No projects found under: ${scanPath}`
       }
 
-      // Get existing index entries so we can skip duplicates
       const existingContent = readIndex()
       const existingEntries = parseIndexEntries(existingContent)
-      const existingSessionIDs = new Set(existingEntries.map((e) => e.sessionID))
+      const existingProjects = new Set(
+        existingEntries
+          .filter((e) => e.sessionID.startsWith("seed-"))
+          .map((e) => e.project)
+      )
 
       let added = 0
       let updated = 0
-      let skipped = 0
       const details: string[] = []
 
+      const date = new Date().toISOString().slice(0, 10)
+
       for (const projectDir of projectDirs) {
-        const sessionsDir = join(projectDir, ".opencode", "memory", "sessions")
-        let sessionFiles: string[]
+        const info = analyzeProject(projectDir)
 
-        try {
-          sessionFiles = readdirSync(sessionsDir)
-            .filter((f) => f.endsWith(".md"))
-            .map((f) => join(sessionsDir, f))
-        } catch {
-          continue
+        const topicsStr = [
+          ...info.languages,
+          ...info.frameworks,
+          ...info.topics.filter((t) => !t.startsWith("dir:")),
+        ].join(", ")
+
+        const dirTopics = info.topics
+          .filter((t) => t.startsWith("dir:"))
+          .map((t) => t.replace("dir:", ""))
+
+        const entry: MemoryEntry = {
+          date,
+          sessionID: `seed-${info.name}`,
+          project: projectDir,
+          summary: info.summary,
+          keyTopics: topicsStr || info.name,
+          decisions: `Languages: ${info.languages.join(", ") || "unknown"}. Frameworks: ${info.frameworks.join(", ") || "none detected"}.${dirTopics.length > 0 ? ` Key dirs: ${dirTopics.join(", ")}` : ""}`,
+          sessionFilePath: "",
         }
 
-        for (const sessionFile of sessionFiles) {
-          const entry = parseSessionFile(sessionFile, projectDir)
-          if (!entry) {
-            skipped++
-            continue
-          }
+        const isUpdate = existingProjects.has(projectDir)
+        writeIndexEntry(entry)
 
-          if (existingSessionIDs.has(entry.sessionID)) {
-            // Update existing entry
-            writeIndexEntry(entry)
-            updated++
-          } else {
-            writeIndexEntry(entry)
-            existingSessionIDs.add(entry.sessionID)
-            added++
-          }
+        if (isUpdate) {
+          updated++
+        } else {
+          existingProjects.add(projectDir)
+          added++
         }
 
-        details.push(`${projectDir}: ${sessionFiles.length} session file(s)`)
+        details.push(
+          `  ${info.name} (${projectDir})` +
+          `\n    ${info.summary.slice(0, 100)}` +
+          `\n    [${info.languages.join(", ")}] [${info.frameworks.join(", ")}]`
+        )
       }
 
       const lines = [
         `Seed complete.`,
         ``,
-        `Projects scanned: ${projectDirs.length}`,
-        `Sessions added: ${added}`,
-        `Sessions updated: ${updated}`,
-        `Sessions skipped (unparseable): ${skipped}`,
+        `Projects found: ${projectDirs.length}`,
+        `Added to memory: ${added}`,
+        `Updated: ${updated}`,
         ``,
-        `Projects found:`,
-        ...details.map((d) => `  ${d}`),
+        `Projects:`,
+        ...details,
       ]
 
       return lines.join("\n")
