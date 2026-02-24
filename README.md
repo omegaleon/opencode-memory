@@ -39,7 +39,7 @@ Save session context to persistent memory. Accepts:
 - `important_context` (optional) — technical details for future sessions
 - `unfinished` (optional) — next steps
 
-Can be called multiple times per session (updates the existing entry).
+Can be called multiple times per session — each call appends a new timestamped snapshot to the session file, so context built up before compaction is never overwritten.
 
 ### `memory_recall`
 
@@ -65,7 +65,7 @@ The global index contains reverse-chronological summaries with paths to local se
 
 ### Automatic behaviors
 
-1. **System prompt injection** — when context usage exceeds 60%, a note is injected into the system prompt. At 80%, the warning becomes urgent.
+1. **System prompt injection** — a save reminder is injected every ~10K tokens. At 60% context usage the reminder becomes more direct. At 80% it becomes urgent.
 2. **Compaction hook** — when OpenCode triggers session compaction, the plugin injects instructions asking the LLM to save context to memory first.
 
 ## Development
