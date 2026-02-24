@@ -45,14 +45,29 @@ const SKIP_DIRS = new Set([
   ".opencode",
 ])
 
-interface ProjectInfo {
-  path: string
-  name: string
-  summary: string
-  topics: string[]
-  languages: string[]
-  frameworks: string[]
-}
+/** Key files to read for project context, in priority order */
+const KEY_FILES = [
+  "README.md",
+  "readme.md",
+  "README",
+  "README.rst",
+  "AGENTS.md",
+  "CLAUDE.md",
+  "package.json",
+  "pyproject.toml",
+  "Cargo.toml",
+  "go.mod",
+  "docker-compose.yml",
+  "docker-compose.yaml",
+  "Dockerfile",
+  "Makefile",
+  "setup.py",
+  "setup.cfg",
+  "pom.xml",
+  "build.gradle",
+  "Gemfile",
+  "mix.exs",
+]
 
 /**
  * Find project directories under a root path.
@@ -66,14 +81,13 @@ function findProjects(rootPath: string, maxDepth: number): string[] {
     try {
       const entries = readdirSync(dir, { withFileTypes: true })
 
-      // Check if this directory is a project
       const isProject = PROJECT_MARKERS.some((marker) =>
         entries.some((e) => e.name === marker)
       )
 
       if (isProject && !isRoot) {
-        // Non-root project: add it and only recurse into monorepo dirs
         results.push(dir)
+        // Check monorepo subdirs
         if (depth < maxDepth) {
           for (const entry of entries) {
             if (!entry.isDirectory()) continue
@@ -91,8 +105,6 @@ function findProjects(rootPath: string, maxDepth: number): string[] {
         return
       }
 
-      // Root dir or non-project: always recurse into all child directories
-      // (If root is also a project, skip adding it — it's a container, not a real project)
       for (const entry of entries) {
         if (!entry.isDirectory()) continue
         if (SKIP_DIRS.has(entry.name)) continue
@@ -109,184 +121,139 @@ function findProjects(rootPath: string, maxDepth: number): string[] {
 }
 
 /**
- * Read a file safely, return empty string on failure.
+ * Read a file safely, truncated to maxBytes.
  */
-function safeRead(filePath: string, maxBytes: number = 4096): string {
+function safeRead(filePath: string, maxBytes: number = 3000): string {
   try {
     if (!existsSync(filePath)) return ""
-    const stat = statSync(filePath)
-    if (stat.size > maxBytes * 2) {
-      // Read only the beginning for large files
-      const buf = Buffer.alloc(maxBytes)
-      const fd = require("node:fs").openSync(filePath, "r")
-      require("node:fs").readSync(fd, buf, 0, maxBytes, 0)
-      require("node:fs").closeSync(fd)
-      return buf.toString("utf-8")
-    }
-    return readFileSync(filePath, "utf-8")
+    const content = readFileSync(filePath, "utf-8")
+    return content.length > maxBytes
+      ? content.slice(0, maxBytes) + "\n...(truncated)"
+      : content
   } catch {
     return ""
   }
 }
 
 /**
- * Analyze a project directory and extract key information.
+ * Build a recursive directory tree string, limited depth.
  */
-function analyzeProject(projectDir: string): ProjectInfo {
+function dirTree(dir: string, prefix: string = "", depth: number = 0, maxDepth: number = 3): string {
+  if (depth > maxDepth) return ""
+
+  try {
+    const entries = readdirSync(dir, { withFileTypes: true })
+      .filter((e) => {
+        if (SKIP_DIRS.has(e.name)) return false
+        if (e.name.startsWith(".") && e.name !== ".env.example") return false
+        return true
+      })
+      .sort((a, b) => {
+        // Directories first, then files
+        if (a.isDirectory() && !b.isDirectory()) return -1
+        if (!a.isDirectory() && b.isDirectory()) return 1
+        return a.name.localeCompare(b.name)
+      })
+      .slice(0, 25) // cap entries per level
+
+    let result = ""
+    for (let i = 0; i < entries.length; i++) {
+      const entry = entries[i]!
+      const isLast = i === entries.length - 1
+      const connector = isLast ? "└── " : "├── "
+      const childPrefix = isLast ? "    " : "│   "
+
+      if (entry.isDirectory()) {
+        result += `${prefix}${connector}${entry.name}/\n`
+        result += dirTree(
+          join(dir, entry.name),
+          prefix + childPrefix,
+          depth + 1,
+          maxDepth
+        )
+      } else {
+        result += `${prefix}${connector}${entry.name}\n`
+      }
+    }
+    return result
+  } catch {
+    return ""
+  }
+}
+
+/**
+ * Gather all relevant context about a project for LLM analysis.
+ */
+function gatherProjectContext(projectDir: string): string {
   const name = basename(projectDir)
-  const languages: string[] = []
-  const frameworks: string[] = []
-  const topics: string[] = []
-  const summaryParts: string[] = []
+  const lines: string[] = []
 
-  // Read package.json
-  const pkgJson = safeRead(join(projectDir, "package.json"))
-  if (pkgJson) {
-    try {
-      const pkg = JSON.parse(pkgJson)
-      languages.push("JavaScript/TypeScript")
-      if (pkg.description) summaryParts.push(pkg.description)
+  lines.push(`# Project: ${name}`)
+  lines.push(`Path: ${projectDir}`)
+  lines.push("")
 
-      const allDeps = {
-        ...pkg.dependencies,
-        ...pkg.devDependencies,
-      }
-      // Detect frameworks from dependencies
-      if (allDeps?.react) frameworks.push("React")
-      if (allDeps?.next) frameworks.push("Next.js")
-      if (allDeps?.vue) frameworks.push("Vue")
-      if (allDeps?.nuxt) frameworks.push("Nuxt")
-      if (allDeps?.svelte) frameworks.push("Svelte")
-      if (allDeps?.express) frameworks.push("Express")
-      if (allDeps?.fastify) frameworks.push("Fastify")
-      if (allDeps?.nestjs || allDeps?.["@nestjs/core"]) frameworks.push("NestJS")
-      if (allDeps?.electron) frameworks.push("Electron")
-      if (allDeps?.typescript) languages.push("TypeScript")
-      if (allDeps?.tailwindcss) frameworks.push("Tailwind")
-      if (allDeps?.prisma || allDeps?.["@prisma/client"]) frameworks.push("Prisma")
-      if (allDeps?.drizzle || allDeps?.["drizzle-orm"]) frameworks.push("Drizzle")
-      if (allDeps?.mongoose) frameworks.push("Mongoose")
-      if (allDeps?.["@opencode-ai/plugin"]) frameworks.push("OpenCode Plugin")
+  // Directory tree
+  lines.push("## Directory Structure")
+  lines.push("```")
+  lines.push(`${name}/`)
+  lines.push(dirTree(projectDir))
+  lines.push("```")
+  lines.push("")
 
-      // Scripts as topic hints
-      if (pkg.scripts) {
-        const scriptNames = Object.keys(pkg.scripts)
-        if (scriptNames.includes("test")) topics.push("tests")
-        if (scriptNames.includes("deploy")) topics.push("deployment")
-        if (scriptNames.includes("lint")) topics.push("linting")
-      }
-    } catch {
-      // Invalid JSON
+  // Read key files
+  lines.push("## Key Files")
+  const readFiles = new Set<string>()
+  for (const fileName of KEY_FILES) {
+    const content = safeRead(join(projectDir, fileName))
+    if (content) {
+      readFiles.add(fileName)
+      lines.push(`### ${fileName}`)
+      lines.push("```")
+      lines.push(content)
+      lines.push("```")
+      lines.push("")
     }
   }
 
-  // Read pyproject.toml / setup.py
-  const pyproject = safeRead(join(projectDir, "pyproject.toml"))
-  if (pyproject) {
-    languages.push("Python")
-    const nameMatch = pyproject.match(/^name\s*=\s*"(.+)"/m)
-    const descMatch = pyproject.match(/^description\s*=\s*"(.+)"/m)
-    if (descMatch) summaryParts.push(descMatch[1]!)
-
-    if (pyproject.includes("django")) frameworks.push("Django")
-    if (pyproject.includes("flask")) frameworks.push("Flask")
-    if (pyproject.includes("fastapi")) frameworks.push("FastAPI")
-    if (pyproject.includes("boto3")) frameworks.push("AWS/boto3")
-    if (pyproject.includes("elasticsearch")) frameworks.push("Elasticsearch")
-    if (pyproject.includes("pandas")) frameworks.push("Pandas")
-    if (pyproject.includes("sqlalchemy")) frameworks.push("SQLAlchemy")
-  }
-
-  const setupPy = safeRead(join(projectDir, "setup.py"))
-  if (setupPy && !languages.includes("Python")) {
-    languages.push("Python")
-  }
-
-  // Read Cargo.toml
-  const cargoToml = safeRead(join(projectDir, "Cargo.toml"))
-  if (cargoToml) {
-    languages.push("Rust")
-    const descMatch = cargoToml.match(/^description\s*=\s*"(.+)"/m)
-    if (descMatch) summaryParts.push(descMatch[1]!)
-  }
-
-  // Read go.mod
-  const goMod = safeRead(join(projectDir, "go.mod"))
-  if (goMod) {
-    languages.push("Go")
-  }
-
-  // Read README (first 2000 chars for summary extraction)
-  const readmeNames = ["README.md", "readme.md", "README", "README.rst", "README.txt"]
-  for (const readmeName of readmeNames) {
-    const readme = safeRead(join(projectDir, readmeName), 2000)
-    if (readme) {
-      // Extract first paragraph as description
-      const firstPara = readme
-        .replace(/^#[^\n]*\n+/, "") // strip title
-        .replace(/^\[.*?\].*\n*/gm, "") // strip badges
-        .replace(/^>\s.*\n*/gm, "") // strip blockquotes
-        .trim()
-        .split(/\n\n/)[0]
-
-      if (firstPara && firstPara.length > 10 && firstPara.length < 500) {
-        summaryParts.push(firstPara.replace(/\n/g, " "))
-      }
-      break
-    }
-  }
-
-  // Check for Docker
-  if (
-    existsSync(join(projectDir, "Dockerfile")) ||
-    existsSync(join(projectDir, "docker-compose.yml")) ||
-    existsSync(join(projectDir, "docker-compose.yaml"))
-  ) {
-    topics.push("Docker")
-  }
-
-  // Check for CI/CD
-  if (existsSync(join(projectDir, ".github", "workflows"))) {
-    topics.push("GitHub Actions")
-  }
-  if (existsSync(join(projectDir, ".gitlab-ci.yml"))) {
-    topics.push("GitLab CI")
-  }
-
-  // Check for Terraform/IaC
+  // Also read any .md files in the project root not already covered
   try {
-    const files = readdirSync(projectDir)
-    if (files.some((f) => f.endsWith(".tf"))) {
-      topics.push("Terraform")
-      languages.push("HCL")
+    const rootFiles = readdirSync(projectDir)
+      .filter((f) => f.endsWith(".md") && !readFiles.has(f))
+      .slice(0, 10)
+    for (const mdFile of rootFiles) {
+      const content = safeRead(join(projectDir, mdFile))
+      if (content) {
+        lines.push(`### ${mdFile}`)
+        lines.push("```")
+        lines.push(content)
+        lines.push("```")
+        lines.push("")
+      }
     }
   } catch {}
 
-  // Build the directory listing for context
+  // Check subdirectories for their own key files (e.g., client/package.json, server/package.json)
   try {
-    const topLevel = readdirSync(projectDir)
-      .filter((f) => !f.startsWith(".") && f !== "node_modules")
-      .slice(0, 30)
-    topics.push(...topLevel.filter((f) => {
-      try {
-        return statSync(join(projectDir, f)).isDirectory()
-      } catch { return false }
-    }).map((d) => `dir:${d}`))
+    const subdirs = readdirSync(projectDir, { withFileTypes: true })
+      .filter((e) => e.isDirectory() && !SKIP_DIRS.has(e.name) && !e.name.startsWith("."))
+      .slice(0, 10)
+
+    for (const subdir of subdirs) {
+      const subPath = join(projectDir, subdir.name)
+      for (const fileName of ["package.json", "pyproject.toml", "Cargo.toml", "go.mod", "README.md", "AGENTS.md", "CLAUDE.md"]) {
+        const content = safeRead(join(subPath, fileName), 1500)
+        if (content) {
+          lines.push(`### ${subdir.name}/${fileName}`)
+          lines.push("```")
+          lines.push(content)
+          lines.push("```")
+          lines.push("")
+        }
+      }
+    }
   } catch {}
 
-  // Build summary
-  const summary = summaryParts.length > 0
-    ? summaryParts[0]!
-    : `${languages.join("/")} project`
-
-  return {
-    path: projectDir,
-    name,
-    summary: summary.slice(0, 300),
-    topics: [...new Set(topics)],
-    languages: [...new Set(languages)],
-    frameworks: [...new Set(frameworks)],
-  }
+  return lines.join("\n")
 }
 
 export function createMemorySeedTool() {
@@ -320,72 +287,29 @@ export function createMemorySeedTool() {
         return `No projects found under: ${scanPath}`
       }
 
-      const existingContent = readIndex()
-      const existingEntries = parseIndexEntries(existingContent)
-      const existingProjects = new Set(
-        existingEntries
-          .filter((e) => e.sessionID.startsWith("seed-"))
-          .map((e) => e.project)
-      )
-
-      let added = 0
-      let updated = 0
-      const details: string[] = []
-
-      const date = new Date().toISOString().slice(0, 10)
-
+      // Gather context for each project
+      const projectContexts: string[] = []
       for (const projectDir of projectDirs) {
-        const info = analyzeProject(projectDir)
-
-        const topicsStr = [
-          ...info.languages,
-          ...info.frameworks,
-          ...info.topics.filter((t) => !t.startsWith("dir:")),
-        ].join(", ")
-
-        const dirTopics = info.topics
-          .filter((t) => t.startsWith("dir:"))
-          .map((t) => t.replace("dir:", ""))
-
-        const entry: MemoryEntry = {
-          date,
-          sessionID: `seed-${info.name}`,
-          project: projectDir,
-          summary: info.summary,
-          keyTopics: topicsStr || info.name,
-          decisions: `Languages: ${info.languages.join(", ") || "unknown"}. Frameworks: ${info.frameworks.join(", ") || "none detected"}.${dirTopics.length > 0 ? ` Key dirs: ${dirTopics.join(", ")}` : ""}`,
-          sessionFilePath: "",
-        }
-
-        const isUpdate = existingProjects.has(projectDir)
-        writeIndexEntry(entry)
-
-        if (isUpdate) {
-          updated++
-        } else {
-          existingProjects.add(projectDir)
-          added++
-        }
-
-        details.push(
-          `  ${info.name} (${projectDir})` +
-          `\n    ${info.summary.slice(0, 100)}` +
-          `\n    [${info.languages.join(", ")}] [${info.frameworks.join(", ")}]`
-        )
+        projectContexts.push(gatherProjectContext(projectDir))
       }
 
-      const lines = [
-        `Seed complete.`,
-        ``,
-        `Projects found: ${projectDirs.length}`,
-        `Added to memory: ${added}`,
-        `Updated: ${updated}`,
-        ``,
-        `Projects:`,
-        ...details,
+      // Return the raw data for the LLM to analyze
+      const output = [
+        `Found ${projectDirs.length} project(s) under ${scanPath}.`,
+        "",
+        "For each project below, analyze the code structure, config files, and README to understand what it is.",
+        "Then call memory_save for each project with:",
+        "  - summary: concise description of what the project does",
+        "  - key_topics: languages, frameworks, key technologies, domain",
+        "  - decisions: architecture notes, deployment method, key patterns",
+        "  - important_context: anything useful for future sessions working on this project",
+        "",
+        "=".repeat(80),
+        "",
+        projectContexts.join("\n" + "=".repeat(80) + "\n\n"),
       ]
 
-      return lines.join("\n")
+      return output.join("\n")
     },
   })
 }
