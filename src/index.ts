@@ -13,7 +13,7 @@ export const MemoryPlugin: Plugin = async ({ client, directory }) => {
     currentSessionID: null,
     lastActivity: Date.now(),
     lastSavedTokens: 0,
-    saving: false,
+    promptedToSave: false,
   }
 
   return {
@@ -28,8 +28,8 @@ export const MemoryPlugin: Plugin = async ({ client, directory }) => {
     // Event tracking + auto-save every ~10K tokens
     event: createEventHook(client, directory, tracker),
 
-    // Auto-save on compaction (extracts data directly, then asks LLM to enrich)
-    "experimental.session.compacting": createCompactionHook(client, directory),
+    // Prompt LLM to call memory_save before compaction wipes context
+    "experimental.session.compacting": createCompactionHook(),
 
     // Context % warnings in system prompt
     "experimental.chat.system.transform": createSystemHook(client, tracker),

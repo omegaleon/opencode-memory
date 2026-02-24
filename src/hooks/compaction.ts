@@ -1,43 +1,18 @@
-import type { Hooks, PluginInput } from "@opencode-ai/plugin"
-import { extractSessionData } from "../lib/extract.js"
-import { writeIndexEntry, writeSessionFile } from "../lib/storage.js"
+import type { Hooks } from "@opencode-ai/plugin"
 
 /**
- * Hook into session compaction to:
- * 1. Auto-save session data to memory BEFORE compaction wipes context
- * 2. Inject instruction for the LLM to enrich the save with its own summary
+ * Hook into session compaction to instruct the LLM to save memory
+ * before context is wiped. The LLM writes the summary — not auto-extract.
  */
-export function createCompactionHook(
-  client: PluginInput["client"],
-  directory: string
-): Hooks["experimental.session.compacting"] {
+export function createCompactionHook(): Hooks["experimental.session.compacting"] {
   return async (input, output) => {
-    // Step 1: Auto-extract and save immediately (no LLM needed)
-    try {
-      const data = await extractSessionData(client, input.sessionID, directory)
-      if (data) {
-        const sessionFilePath = writeSessionFile(directory, data)
-        writeIndexEntry({
-          date: data.date,
-          sessionID: data.sessionID,
-          project: directory,
-          summary: data.summary,
-          keyTopics: data.keyTopics,
-          decisions: data.decisions,
-          unfinished: data.unfinished,
-          sessionFilePath,
-        })
-      }
-    } catch {
-      // Don't block compaction if memory save fails
-    }
-
-    // Step 2: Also ask the LLM to provide a richer summary
     output.context.push(
-      "MEMORY PLUGIN: Session data has been auto-saved to persistent memory. " +
-      "To improve the saved context, call memory_save with a human-readable summary, " +
-      "key topics, decisions made, and any unfinished work. This will update the existing entry " +
-      "with richer detail than the auto-extracted version."
+      "MEMORY PLUGIN: This session is about to be compacted and context will be lost. " +
+      "You MUST call memory_save NOW before compaction completes. " +
+      "Write a high-quality summary covering: what was built or changed, key technical decisions, " +
+      "important discoveries, and any unfinished work. " +
+      "Do NOT use project_path — omit it entirely so the session file is written correctly. " +
+      "This is your only chance to preserve this session's context."
     )
   }
 }

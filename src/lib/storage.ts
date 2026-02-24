@@ -146,32 +146,45 @@ export function writeSessionFile(
   const fileName = getSessionFileName(detail.date, detail.sessionID)
   const filePath = join(sessionsDir, fileName)
 
-  let content = `# Session ${detail.sessionID} — ${detail.date}\n\n`
-  content += `**Project**: ${detail.project}\n`
-  if (detail.model) content += `**Model**: ${detail.model}\n`
-  if (detail.tokensUsed != null) {
-    content += `**Context Used**: ${detail.tokensUsed.toLocaleString()} tokens`
-    if (detail.contextPercent != null) {
-      content += ` (${detail.contextPercent}%)`
-    }
-    content += "\n"
+  const isNew = !existsSync(filePath)
+
+  // Header block written once when file is first created
+  let header = ""
+  if (isNew) {
+    header += `# Session ${detail.sessionID} — ${detail.date}\n\n`
+    header += `**Project**: ${detail.project}\n`
+    if (detail.model) header += `**Model**: ${detail.model}\n`
   }
 
-  content += `\n## Summary\n${detail.summary}\n`
-  content += `\n## Key Topics\n${detail.keyTopics}\n`
-  content += `\n## Decisions\n${detail.decisions}\n`
+  // Each save appends a new timestamped snapshot
+  const timestamp = new Date().toISOString().replace("T", " ").slice(0, 16)
+  let snapshot = `\n---\n\n## Snapshot — ${timestamp}`
+  if (detail.tokensUsed != null) {
+    snapshot += ` | ${detail.tokensUsed.toLocaleString()} tokens`
+    if (detail.contextPercent != null) snapshot += ` (${detail.contextPercent}%)`
+  }
+  snapshot += `\n`
+  snapshot += `\n### Summary\n${detail.summary}\n`
+  snapshot += `\n### Key Topics\n${detail.keyTopics}\n`
+  snapshot += `\n### Decisions\n${detail.decisions}\n`
 
   if (detail.codeChanges) {
-    content += `\n## Code Changes\n${detail.codeChanges}\n`
+    snapshot += `\n### Code Changes\n${detail.codeChanges}\n`
   }
   if (detail.importantContext) {
-    content += `\n## Important Context for Future Sessions\n${detail.importantContext}\n`
+    snapshot += `\n### Important Context\n${detail.importantContext}\n`
   }
   if (detail.unfinished) {
-    content += `\n## Unfinished / Next Steps\n${detail.unfinished}\n`
+    snapshot += `\n### Unfinished / Next Steps\n${detail.unfinished}\n`
   }
 
-  writeFileSync(filePath, content, "utf-8")
+  if (isNew) {
+    writeFileSync(filePath, header + snapshot, "utf-8")
+  } else {
+    const existing = readFileSync(filePath, "utf-8")
+    writeFileSync(filePath, existing + snapshot, "utf-8")
+  }
+
   return filePath
 }
 

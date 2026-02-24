@@ -13,12 +13,18 @@ export function createMemorySaveTool(
       "Save current session context to persistent memory. " +
       "Writes a summary to the global memory index and full detail to a local session file. " +
       "Call this to preserve important context before compaction or at the end of a session. " +
-      "Can be called multiple times — subsequent calls update the existing entry for this session.",
+      "Can be called multiple times — subsequent calls update the existing entry for this session. " +
+      "IMPORTANT: Do NOT set project_path for normal session saves — omit it entirely. " +
+      "project_path is only used by memory_seed for one-time project indexing. " +
+      "Write high-quality human-readable content: synthesize what actually happened, " +
+      "not raw tool call lists or verbatim user messages.",
     args: {
       summary: tool.schema
         .string()
         .describe(
-          "1-3 sentence summary of what was accomplished or what this project is."
+          "2-4 sentence human-readable summary of what was accomplished. " +
+          "Be specific: mention what was built, what problems were solved, what was tested. " +
+          "Do NOT dump raw user messages or tool call lists."
         ),
       key_topics: tool.schema
         .string()
@@ -28,7 +34,8 @@ export function createMemorySaveTool(
       decisions: tool.schema
         .string()
         .describe(
-          "Key decisions, architecture notes, or technical details."
+          "Key decisions, architecture notes, and technical details as bullet points. " +
+          "Include specific values, configurations, and rationale — not just tool names."
         ),
       code_changes: tool.schema
         .string()
@@ -75,33 +82,41 @@ export function createMemorySaveTool(
 
         const usage = await getContextUsage(client, context.sessionID)
 
-        sessionFilePath = writeSessionFile(projectDir, {
-          sessionID: shortID,
-          date,
-          project: projectDir,
-          model: usage?.model.id,
-          tokensUsed: usage?.tokens.total,
-          contextPercent: usage?.percentage,
-          summary: args.summary,
-          keyTopics: args.key_topics,
-          decisions: args.decisions,
-          codeChanges: args.code_changes,
-          importantContext: args.important_context,
-          unfinished: args.unfinished,
-        })
+        try {
+          sessionFilePath = writeSessionFile(projectDir, {
+            sessionID: shortID,
+            date,
+            project: projectDir,
+            model: usage?.model.id,
+            tokensUsed: usage?.tokens.total,
+            contextPercent: usage?.percentage,
+            summary: args.summary,
+            keyTopics: args.key_topics,
+            decisions: args.decisions,
+            codeChanges: args.code_changes,
+            importantContext: args.important_context,
+            unfinished: args.unfinished,
+          })
+        } catch (err) {
+          return `Failed to write session file to ${projectDir}: ${err}`
+        }
       }
 
       // Write/update the global index entry
-      writeIndexEntry({
-        date,
-        sessionID: shortID,
-        project: projectDir,
-        summary: args.summary,
-        keyTopics: args.key_topics,
-        decisions: args.decisions,
-        unfinished: args.unfinished,
-        sessionFilePath,
-      })
+      try {
+        writeIndexEntry({
+          date,
+          sessionID: shortID,
+          project: projectDir,
+          summary: args.summary,
+          keyTopics: args.key_topics,
+          decisions: args.decisions,
+          unfinished: args.unfinished,
+          sessionFilePath,
+        })
+      } catch (err) {
+        return `Failed to write global memory index: ${err}`
+      }
 
       if (isProjectSeed) {
         return [
