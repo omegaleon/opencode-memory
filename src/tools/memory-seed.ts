@@ -287,22 +287,52 @@ export function createMemorySeedTool() {
         return `No projects found under: ${scanPath}`
       }
 
-      // Gather context for each project
+      const date = new Date().toISOString().slice(0, 10)
+
+      // Gather context for each project and write basic entries to global index
       const projectContexts: string[] = []
+      const seeded: string[] = []
+
       for (const projectDir of projectDirs) {
-        projectContexts.push(gatherProjectContext(projectDir))
+        const name = basename(projectDir)
+        const context = gatherProjectContext(projectDir)
+        projectContexts.push(context)
+
+        // Write a placeholder entry to the global index (no local file)
+        writeIndexEntry({
+          date,
+          sessionID: `seed-${name}`,
+          project: projectDir,
+          summary: `[Seeded] ${name} — awaiting LLM analysis`,
+          keyTopics: name,
+          decisions: "",
+          sessionFilePath: "",
+        })
+
+        seeded.push(name)
       }
 
-      // Return the raw data for the LLM to analyze
+      // Return raw project data for the LLM to analyze
+      // The LLM should review the data, then update each seed entry
+      // by calling memory_save with a proper summary for each project
       const output = [
         `Found ${projectDirs.length} project(s) under ${scanPath}.`,
+        `Seeded placeholder entries: ${seeded.join(", ")}`,
         "",
-        "For each project below, analyze the code structure, config files, and README to understand what it is.",
-        "Then call memory_save for each project with:",
+        "Placeholder entries written to ~/.config/opencode/memory/MEMORY.md (global index only, no local files).",
+        "",
+        "IMPORTANT: Review each project below and update the placeholder entries.",
+        "For each project, call memory_save with project_path set to the project's path.",
+        "This writes to the global index ONLY (no files created inside projects).",
+        "",
+        "Required memory_save args for each project:",
+        "  - project_path: the project's absolute path (e.g., '/code/omegaterm')",
         "  - summary: concise description of what the project does",
         "  - key_topics: languages, frameworks, key technologies, domain",
         "  - decisions: architecture notes, deployment method, key patterns",
         "  - important_context: anything useful for future sessions working on this project",
+        "",
+        "The memory_save calls will update the existing seed entries with richer detail.",
         "",
         "=".repeat(80),
         "",
