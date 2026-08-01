@@ -42,8 +42,11 @@ export function createInjectHook(directory: string): Hooks["experimental.chat.sy
         output.system.push(
           "[MEMORY] Persistent wiki index:\n" +
           cached.toc +
-          "\nBefore claiming you lack knowledge or access for a task (credentials, " +
-          "APIs, debugging steps, deployment details), check relevant pages via memory_recall."
+          "\nIf the current task involves any topic listed above, load that page with " +
+          "memory_recall BEFORE answering — wiki pages contain environment-specific " +
+          "details (exact endpoints, gotchas, access patterns) that override general " +
+          "knowledge. Also check relevant pages before claiming you lack knowledge or " +
+          "access for a task (credentials, APIs, debugging steps, deployment details)."
         )
       }
       if (cached.overview) {
