@@ -1,91 +1,108 @@
 # opencode-memory
 
-Persistent memory for [OpenCode](https://opencode.ai) — automatically saves session context and enables cross-session recall.
-
-## What it does
-
-- **Saves session context** to persistent files that survive across sessions
-- **Global memory index** (`~/.config/opencode/memory/MEMORY.md`) with summaries and pointers
-- **Per-project session files** (`{project}/.opencode/memory/sessions/`) with full detail
-- **Three tools** for the LLM: `context_usage`, `memory_save`, `memory_recall`
-- **Auto-save on compaction** — injects instructions to save context before the session is compacted
-- **Context warnings** — alerts the LLM when context usage hits 60% and 80%
-
-## Installation
-
-Add to your `opencode.json`:
-
-```json
-{
-  "plugin": ["opencode-memory"]
-}
-```
-
-OpenCode will auto-install it via Bun on next startup.
-
-## Tools
-
-### `context_usage`
-
-Check current context window usage. Returns token count, percentage used, and breakdown by type.
-
-### `memory_save`
-
-Save session context to persistent memory. Accepts:
-- `summary` — what was accomplished
-- `key_topics` — comma-separated topics
-- `decisions` — key decisions made
-- `code_changes` (optional) — files created/modified
-- `important_context` (optional) — technical details for future sessions
-- `unfinished` (optional) — next steps
-
-Can be called multiple times per session — each call appends a new timestamped snapshot to the session file, so context built up before compaction is never overwritten.
-
-### `memory_recall`
-
-Search past sessions. Accepts:
-- `query` — keywords to search, or date terms like "yesterday", "last week", "2026-02"
-- `session_id` (optional) — load full detail for a specific session
-
-Two-tier lookup: first returns summaries from the global index, then drill into full session files.
+Wiki-style persistent memory for [OpenCode](https://opencode.ai) — a plain-markdown
+knowledge base that is built automatically from your sessions and injected back into
+every future session as a tiny table of contents.
 
 ## How it works
 
-### Storage architecture
+The plugin maintains a wiki of markdown pages (default `~/wiki`):
 
 ```
-~/.config/opencode/memory/
-  MEMORY.md                              # Global index (all projects)
-
-{project}/.opencode/memory/sessions/
-  2026-02-23_abc12345.md                 # Full session detail
+~/wiki/
+  projects/<name>/overview.md    # per-codebase context (frontmatter: code_path)
+  topics/<slug>.md               # cross-project knowledge (s3, cribl, docker...)
+  investigations/<date>-<slug>.md# one-off troubleshooting write-ups
 ```
 
-The global index contains reverse-chronological summaries with paths to local session files. Each project keeps its own session history.
+Every page carries YAML frontmatter with a one-line `description`. From those
+descriptions the plugin derives a table of contents and injects it into the system
+prompt of every session (~600-800 tokens, hard-capped) together with one rule:
+*before claiming you lack knowledge or access, check the wiki via `memory_recall`.*
+If the session's working directory matches a Project page's `code_path`, that
+project's overview is injected too. Everything else is pulled on demand.
 
-### Automatic behaviors
+Knowledge capture never spends your session's context:
 
-1. **System prompt injection** — a save reminder is injected every ~10K tokens. At 60% context usage the reminder becomes more direct. At 80% it becomes urgent.
-2. **Compaction hook** — when OpenCode triggers session compaction, the plugin injects instructions asking the LLM to save context to memory first.
+- **Janitor** — when a session goes idle (debounced: ≥30 min AND ≥5K new tokens),
+  a child session distills the transcript delta into wiki pages, out-of-band.
+- **Bootstrap** — `memory_bootstrap` seeds the wiki from this machine's *entire*
+  OpenCode session history (read from OpenCode's local database), in resumable
+  batches.
+- **memory_write** — say "memorize this" any time; existing pages are
+  read-merge-rewritten, never appended.
+- **Compaction hook** — if compaction ever fires, one save request is injected.
+  No periodic save nagging, ever.
 
-## Development
+Pages are validated on write: frontmatter required, one-line description required,
+body capped at 150 lines. Distill, don't narrate.
+
+## Installation
 
 ```bash
-git clone https://github.com/your-org/opencode-memory
+git clone https://github.com/omegaleon/opencode-memory
 cd opencode-memory
 npm install
-npm run typecheck    # Type-check without emitting
-npm run build        # Build to dist/
+npm run build
 ```
 
-### Local testing
-
-For development, use a file plugin reference:
+Then add to `~/.config/opencode/opencode.json` (keep existing plugins in the array):
 
 ```json
 {
   "plugin": ["file:///path/to/opencode-memory/dist/index.js"]
 }
+```
+
+That is the entire setup — the wiki directory, the TOC, and the recall rule all
+ship with the plugin. No AGENTS.md edits, no permission config.
+
+### Bootstrapping a new machine
+
+Start a session and say: *"run memory_bootstrap until it finishes"*. It processes
+historical sessions in batches of 10 and reports progress; repeat calls resume
+where it left off.
+
+## Tools
+
+- `memory_recall` — no args: list all pages. `query`: keyword search.
+  `page`: load one page in full.
+- `memory_write` — create or update a page (`Topic` / `Investigation` / `Project`).
+  Updates replace the page; the tool rejects oversized or unstructured writes.
+- `memory_bootstrap` — batch-distill historical sessions into the wiki.
+- `context_usage` — current token usage and context limit.
+
+## Configuration
+
+- `OPENCODE_WIKI_DIR` — wiki location (default `~/wiki`).
+- **Git (optional)** — if the wiki dir is a git repo, every write is committed
+  (`git init ~/wiki` to enable; skip it and nothing changes).
+- **Obsidian (optional)** — open the wiki dir as a vault to browse/search/graph it.
+  The plugin neither knows nor cares.
+
+## Page format
+
+```markdown
+---
+type: Topic
+title: "s3-troubleshooting"
+description: "S3 access debugging — try aws --profile default first; bucket policy vs IAM gotchas"
+tags: [aws, s3]
+timestamp: 2026-07-31T12:00:00Z
+---
+
+...body (max 150 lines)...
+```
+
+`description` is what appears in the injected TOC — it earns the page its
+discoverability. Project pages additionally carry `code_path: /abs/path/to/repo`,
+which is how sessions in that directory get the overview injected automatically.
+
+## Development
+
+```bash
+npm run typecheck    # Type-check without emitting
+npm run build        # Build to dist/
 ```
 
 ## License

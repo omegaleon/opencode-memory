@@ -1,138 +1,90 @@
 import { tool } from "@opencode-ai/plugin/tool"
-import { existsSync } from "node:fs"
-import {
-  readIndex,
-  parseIndexEntries,
-  readSessionFile,
-} from "../lib/storage.js"
-import { searchEntries, filterByDate } from "../lib/search.js"
+import { listPages, readPage, serializePage } from "../lib/wiki.js"
+
+/** Cap tool output — recall must never become a context bomb */
+const OUTPUT_CHAR_CAP = 20_000
+const MAX_SEARCH_RESULTS = 10
 
 export function createMemoryRecallTool() {
   return tool({
     description:
-      "Recall past session context from persistent memory. " +
-      "First searches the global memory index for matching summaries (fast). " +
-      "Pass a session_id to load full session detail from the local project file. " +
-      "Supports date filters like 'today', 'yesterday', 'last week', 'this month', or '2026-02'.",
+      "Recall knowledge from the persistent wiki. " +
+      "With `page`, returns that page's full content (paths are shown in the [MEMORY] index). " +
+      "With `query`, searches titles/descriptions/tags/bodies and returns matching pages. " +
+      "With neither, lists every page with its one-line description. " +
+      "Use this before claiming you lack knowledge or access for a task.",
     args: {
-      query: tool.schema
-        .string()
-        .describe(
-          "Search query — keywords to match against summaries, topics, decisions, project paths. " +
-          "Also accepts date terms: 'today', 'yesterday', 'last week', 'this month', or ISO date prefix like '2026-02'."
-        ),
-      session_id: tool.schema
+      page: tool.schema
         .string()
         .optional()
-        .describe(
-          "Optional: specific session ID to load full detail. " +
-          "Get this from a previous memory_recall search result."
-        ),
+        .describe("Page path relative to the wiki root, e.g. 'topics/s3-troubleshooting.md'."),
+      query: tool.schema
+        .string()
+        .optional()
+        .describe("Keywords to search across all pages (titles, descriptions, tags, bodies)."),
     },
     async execute(args) {
-      // If a specific session is requested, load its full file
-      if (args.session_id) {
-        const indexContent = readIndex()
-        const entries = parseIndexEntries(indexContent)
-        const entry = entries.find((e) =>
-          e.sessionID.startsWith(args.session_id!)
-        )
+      // Load one page in full
+      if (args.page) {
+        const page = readPage(args.page.trim())
+        if (!page) {
+          return `No page found at: ${args.page}\nCall memory_recall with no args to list available pages.`
+        }
+        return truncate(serializePage(page))
+      }
 
-        if (!entry) {
-          return `No session found matching ID: ${args.session_id}`
+      const pages = listPages()
+      if (pages.length === 0) {
+        return "The wiki is empty. Pages are created by the background janitor, memory_write, or memory_bootstrap."
+      }
+
+      // Keyword search
+      if (args.query) {
+        const keywords = args.query
+          .toLowerCase()
+          .split(/[\s,]+/)
+          .filter((k) => k.length > 1)
+
+        const scored = pages
+          .map((page) => {
+            const haystack = [page.title, page.description, page.tags.join(" "), page.body, page.relPath]
+              .join(" ")
+              .toLowerCase()
+            let score = 0
+            for (const kw of keywords) {
+              if (haystack.includes(kw)) score++
+            }
+            return { page, score }
+          })
+          .filter((s) => s.score > 0)
+          .sort((a, b) => b.score - a.score)
+          .slice(0, MAX_SEARCH_RESULTS)
+
+        if (scored.length === 0) {
+          return `No pages match: ${args.query}\nTotal pages: ${pages.length}. Call with no args to list them.`
         }
 
-        // Check if local session file still exists
-        if (!existsSync(entry.sessionFilePath)) {
-          // Fallback: return what we have from the global index
-          const lines = [
-            `WARNING: Session file not found at: ${entry.sessionFilePath}`,
-            `The project may have been moved or deleted.`,
-            ``,
-            `Returning data from global memory index:`,
-            ``,
-            `Date: ${entry.date}`,
-            `Session: ${entry.sessionID}`,
-            `Project: ${entry.project}`,
-            `Summary: ${entry.summary}`,
-            `Key Topics: ${entry.keyTopics}`,
-            `Decisions: ${entry.decisions}`,
-          ]
-          if (entry.unfinished) {
-            lines.push(`Unfinished: ${entry.unfinished}`)
-          }
-          return lines.join("\n")
+        // Single strong match: return it in full; otherwise list summaries
+        if (scored.length === 1) {
+          return truncate(serializePage(scored[0]!.page))
         }
-
-        const content = readSessionFile(entry.sessionFilePath)
-        return content
-      }
-
-      // Otherwise, search the index
-      const indexContent = readIndex()
-      if (!indexContent.trim()) {
-        return "Memory is empty. No sessions have been saved yet."
-      }
-
-      let entries = parseIndexEntries(indexContent)
-      if (entries.length === 0) {
-        return "Memory index exists but contains no parseable entries."
-      }
-
-      // Apply date filter if the query looks like a date term
-      const dateTerms = [
-        "today",
-        "yesterday",
-        "last week",
-        "this week",
-        "last month",
-        "this month",
-      ]
-      const queryLower = args.query.toLowerCase().trim()
-      const isDateQuery =
-        dateTerms.some((t) => queryLower.includes(t)) ||
-        /^\d{4}/.test(queryLower)
-
-      if (isDateQuery) {
-        entries = filterByDate(entries, queryLower)
-        if (entries.length === 0) {
-          return `No sessions found for date filter: ${args.query}`
+        const lines = [`${scored.length} matching page(s) — load one with memory_recall(page="<path>"):`, ""]
+        for (const { page } of scored) {
+          lines.push(`- ${page.relPath} [${page.type}] — ${page.description}`)
         }
+        return lines.join("\n")
       }
 
-      // Apply keyword search
-      const results = searchEntries(entries, args.query)
-
-      if (results.length === 0) {
-        // Return all entries if no matches but date filter was applied
-        if (isDateQuery && entries.length > 0) {
-          return formatResults(entries.slice(0, 20))
-        }
-        return `No sessions found matching: ${args.query}\n\nTotal sessions in memory: ${entries.length}`
+      // No args: full listing
+      const lines = [`${pages.length} page(s) in the wiki:`, ""]
+      for (const page of pages) {
+        lines.push(`- ${page.relPath} [${page.type}] — ${page.description}`)
       }
-
-      return formatResults(results.slice(0, 20))
+      return truncate(lines.join("\n"))
     },
   })
 }
 
-function formatResults(entries: ReturnType<typeof parseIndexEntries>): string {
-  const lines = [`Found ${entries.length} matching session(s):\n`]
-
-  for (const entry of entries) {
-    const fileExists = existsSync(entry.sessionFilePath)
-    lines.push(`--- ${entry.date} | Session ${entry.sessionID} | ${entry.project}`)
-    lines.push(`Summary: ${entry.summary}`)
-    lines.push(`Topics: ${entry.keyTopics}`)
-    if (entry.decisions) lines.push(`Decisions: ${entry.decisions}`)
-    if (entry.unfinished) lines.push(`Unfinished: ${entry.unfinished}`)
-    if (fileExists) {
-      lines.push(`Full detail: call memory_recall with session_id="${entry.sessionID}"`)
-    } else {
-      lines.push(`[Session file missing — this is all available data for this session]`)
-    }
-    lines.push("")
-  }
-
-  return lines.join("\n")
+function truncate(text: string): string {
+  return text.length > OUTPUT_CHAR_CAP ? text.slice(0, OUTPUT_CHAR_CAP) + "\n…(truncated)" : text
 }

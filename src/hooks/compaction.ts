@@ -1,18 +1,17 @@
 import type { Hooks } from "@opencode-ai/plugin"
 
 /**
- * Hook into session compaction to instruct the LLM to save memory
- * before context is wiped. The LLM writes the summary — not auto-extract.
+ * Last-ditch capture before compaction wipes context. The janitor is the
+ * primary capture path (out-of-band, on idle); this fires only in the rare
+ * case compaction actually happens, and injects ONCE — no nagging.
  */
 export function createCompactionHook(): Hooks["experimental.session.compacting"] {
-  return async (input, output) => {
+  return async (_input, output) => {
     output.context.push(
-      "MEMORY PLUGIN: This session is about to be compacted and context will be lost. " +
-      "You MUST call memory_save NOW before compaction completes. " +
-      "Write a high-quality summary covering: what was built or changed, key technical decisions, " +
-      "important discoveries, and any unfinished work. " +
-      "Do NOT use project_path — omit it entirely so the session file is written correctly. " +
-      "This is your only chance to preserve this session's context."
+      "MEMORY: This session is being compacted. If it produced durable, reusable " +
+      "knowledge not yet in the wiki (root causes, access patterns, deployment " +
+      "details, key decisions), call memory_write now — one Topic/Investigation/" +
+      "Project page with distilled content. If nothing durable was learned, do nothing."
     )
   }
 }

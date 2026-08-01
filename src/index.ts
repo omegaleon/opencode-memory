@@ -1,38 +1,40 @@
 import type { Plugin } from "@opencode-ai/plugin"
 import { createContextUsageTool } from "./tools/context-usage.js"
 import { createMemoryRecallTool } from "./tools/memory-recall.js"
-import { createMemorySaveTool } from "./tools/memory-save.js"
-import { createMemorySeedTool } from "./tools/memory-seed.js"
+import { createMemoryWriteTool } from "./tools/memory-write.js"
+import { createMemoryBootstrapTool } from "./tools/memory-bootstrap.js"
+import { createInjectHook } from "./hooks/inject.js"
+import { createJanitorHook } from "./hooks/janitor.js"
 import { createCompactionHook } from "./hooks/compaction.js"
-import { createEventHook, type SessionTracker } from "./hooks/events.js"
-import { createSystemHook } from "./hooks/system.js"
 
+/**
+ * opencode-memory v2 — wiki-style persistent memory.
+ *
+ * Always-loaded surface: ONE system-prompt injection (derived TOC + recall
+ * rule + matching project overview). Everything else is pulled on demand
+ * (memory_recall) or produced out-of-band (janitor, bootstrap) so the live
+ * session's context never pays for knowledge capture.
+ *
+ * Wiki location: ~/wiki (override with OPENCODE_WIKI_DIR). Plain markdown +
+ * YAML frontmatter; Obsidian-compatible; git optional.
+ */
 export const MemoryPlugin: Plugin = async ({ client, directory }) => {
-  // Shared state for tracking the current session and auto-save thresholds
-  const tracker: SessionTracker = {
-    currentSessionID: null,
-    lastActivity: Date.now(),
-    lastSavedTokens: 0,
-    promptedToSave: false,
-  }
-
   return {
-    // Register custom tools
     tool: {
       context_usage: createContextUsageTool(client),
       memory_recall: createMemoryRecallTool(),
-      memory_save: createMemorySaveTool(client, directory),
-      memory_seed: createMemorySeedTool(),
+      memory_write: createMemoryWriteTool(),
+      memory_bootstrap: createMemoryBootstrapTool(client),
     },
 
-    // Event tracking + auto-save every ~10K tokens
-    event: createEventHook(client, directory, tracker),
+    // Background janitor: harvest transcript deltas on session.idle
+    event: createJanitorHook(client, directory),
 
-    // Prompt LLM to call memory_save before compaction wipes context
+    // TOC + recall rule + project overview injection
+    "experimental.chat.system.transform": createInjectHook(directory),
+
+    // Rare last-ditch capture if compaction ever fires
     "experimental.session.compacting": createCompactionHook(),
-
-    // Context % warnings in system prompt
-    "experimental.chat.system.transform": createSystemHook(client, tracker),
   }
 }
 
