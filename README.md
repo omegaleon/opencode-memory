@@ -39,29 +39,100 @@ body capped at 150 lines. Distill, don't narrate.
 
 ## Installation
 
+These steps are written so that an OpenCode agent can execute them directly
+("clone https://github.com/omegaleon/opencode-memory and install it per its README").
+
+### Step 1 — Clone and build
+
 ```bash
-git clone https://github.com/omegaleon/opencode-memory
-cd opencode-memory
+git clone https://github.com/omegaleon/opencode-memory ~/opencode-memory
+cd ~/opencode-memory
 npm install
 npm run build
 ```
 
-Then add to `~/.config/opencode/opencode.json` (keep existing plugins in the array):
+Verify the build produced the entry point:
+
+```bash
+ls ~/opencode-memory/dist/index.js
+```
+
+Any other clone location works — adjust the paths below to match.
+
+### Step 2 — Register the plugin
+
+Edit `~/.config/opencode/opencode.json` and add the built plugin to the `plugin`
+array. **APPEND to the array — do not replace it.** Removing existing entries
+silently disables other plugins (this exact mistake once disabled a previous
+version of this plugin for months).
+
+The path must be absolute, with the `file://` prefix (no `~`):
 
 ```json
 {
-  "plugin": ["file:///path/to/opencode-memory/dist/index.js"]
+  "plugin": [
+    "existing-plugin-keep-me",
+    "file:///home/YOUR_USER/opencode-memory/dist/index.js"
+  ]
 }
 ```
 
-That is the entire setup — the wiki directory, the TOC, and the recall rule all
-ship with the plugin. No AGENTS.md edits, no permission config.
+If the file has no `plugin` key yet, create it:
 
-### Bootstrapping a new machine
+```json
+{
+  "plugin": ["file:///home/YOUR_USER/opencode-memory/dist/index.js"]
+}
+```
 
-Start a session and say: *"run memory_bootstrap until it finishes"*. It processes
-historical sessions in batches of 10 and reports progress; repeat calls resume
-where it left off.
+No other configuration is required — the wiki directory, injected TOC, and
+recall rule all ship with the plugin. No AGENTS.md edits, no permission rules,
+no instruction files.
+
+### Step 3 — Verify the plugin is loaded
+
+Restart OpenCode (the config is read at startup), then in a fresh session ask:
+
+> call memory_recall with no arguments
+
+Expected on a new machine: `The wiki is empty. Pages are created by the
+background janitor, memory_write, or memory_bootstrap.` If the tool does not
+exist, the plugin did not load — re-check the `file://` path and that
+`dist/index.js` exists.
+
+### Step 4 — Bootstrap from session history
+
+In a session, say:
+
+> run memory_bootstrap until it reports 0 remaining
+
+It reads this machine's OpenCode session database (read-only), distills
+historical sessions into wiki pages in batches of 10, and reports progress per
+batch. It is resumable and idempotent — keep calling it (or letting the agent
+loop) until it reports all sessions processed. Skip this step if the machine
+has no session history worth mining.
+
+### Step 5 (optional) — Git and Obsidian
+
+```bash
+git init ~/wiki    # enables automatic commit of every wiki write
+```
+
+Open `~/wiki` as an Obsidian vault to browse/search/graph the pages. Both are
+optional; the plugin works identically without them.
+
+### Troubleshooting
+
+- **memory tools missing** — plugin not loaded: wrong `file://` path, missing
+  build, or the config edit replaced instead of appended.
+- **"Bootstrap unavailable"** — OpenCode's session DB was not found at
+  `$XDG_DATA_HOME/opencode/opencode.db` (default
+  `~/.local/share/opencode/opencode.db`), or the runtime lacks `bun:sqlite`.
+  The rest of the plugin works fine without bootstrap.
+- **A bootstrap session reports FAILED** — that distillation timed out or
+  errored; it is retried automatically on the next `memory_bootstrap` call.
+- **No `[MEMORY]` block in sessions** — the TOC is only injected once the wiki
+  has at least one page.
 
 ## Tools
 
