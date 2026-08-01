@@ -27,8 +27,8 @@ Knowledge capture never spends your session's context:
 - **Janitor** — when a session goes idle (debounced: ≥30 min AND ≥5K new tokens),
   a child session distills the transcript delta into wiki pages, out-of-band.
 - **Bootstrap** — `memory_bootstrap` seeds the wiki from this machine's *entire*
-  OpenCode session history (read from OpenCode's local database), in resumable
-  batches.
+  OpenCode session history (read from OpenCode's local database). Runs detached
+  in the background; the session stays free and progress is polled on demand.
 - **memory_write** — say "memorize this" any time; existing pages are
   read-merge-rewritten, never appended.
 - **Compaction hook** — if compaction ever fires, one save request is injected.
@@ -104,13 +104,21 @@ exist, the plugin did not load — re-check the `file://` path and that
 
 In a session, say:
 
-> run memory_bootstrap until it reports 0 remaining
+> run memory_bootstrap
 
-It reads this machine's OpenCode session database (read-only), distills
-historical sessions into wiki pages in batches of 10, and reports progress per
-batch. It is resumable and idempotent — keep calling it (or letting the agent
-loop) until it reports all sessions processed. Skip this step if the machine
-has no session history worth mining.
+It reads this machine's OpenCode session database (read-only) and starts a
+**background run** — the tool returns immediately and the session stays free
+while historical sessions are distilled into wiki pages one by one,
+checkpointed as it goes. Then:
+
+- *"how's the bootstrap going?"* → the model calls `action="status"` for an
+  instant progress report (also visible in `{wiki}/.memory-state.json`)
+- *"stop the bootstrap"* → `action="cancel"`, stops between sessions;
+  starting again later resumes where it left off
+
+It is resumable and idempotent — processed sessions are never redone, and a
+crash or restart mid-run loses at most the one session being distilled. Skip
+this step if the machine has no session history worth mining.
 
 ### Step 5 (optional) — Git and Obsidian
 
@@ -129,8 +137,9 @@ optional; the plugin works identically without them.
   `$XDG_DATA_HOME/opencode/opencode.db` (default
   `~/.local/share/opencode/opencode.db`), or the runtime lacks `bun:sqlite`.
   The rest of the plugin works fine without bootstrap.
-- **A bootstrap session reports FAILED** — that distillation timed out or
-  errored; it is retried automatically on the next `memory_bootstrap` call.
+- **Status shows FAILED sessions** — those distillations timed out or errored;
+  they are not marked done and are retried automatically on the next
+  `memory_bootstrap` run.
 - **No `[MEMORY]` block in sessions** — the TOC is only injected once the wiki
   has at least one page.
 

@@ -1,3 +1,4 @@
+import { basename } from "node:path"
 import type { PluginInput } from "@opencode-ai/plugin"
 import type { WikiPage, PageType } from "./wiki.js"
 import { listPages, readPage, writePage, pathFor, slugify, deriveTOC, MAX_BODY_LINES } from "./wiki.js"
@@ -106,7 +107,7 @@ export async function distillTranscript(
     const report: DistillReport = { written: [], skipped: [] }
 
     for (const block of parseBlocks(reply)) {
-      const relPath = pathFor(block.type, block.slug)
+      const relPath = resolveRelPath(block)
       const existing = readPage(relPath)
 
       let final = block
@@ -145,6 +146,29 @@ export async function distillTranscript(
   } catch {
     return null
   }
+}
+
+/**
+ * Resolve the on-disk path for a distilled block. For Project pages the
+ * identity is code_path, NOT the model-chosen slug: if any existing project
+ * page documents the same code directory, the block merges into that page,
+ * and new project pages are slugged from the directory basename. This makes
+ * duplicate project pages structurally impossible regardless of what slug
+ * the distiller invents (observed failure: "jira-remindme" and
+ * "jira-remindme-overview" created for one repo 36s apart).
+ * Re-reads the page list fresh so pages written earlier in the same run
+ * are visible.
+ */
+function resolveRelPath(block: ParsedBlock): string {
+  if (block.type === "Project" && block.codePath) {
+    const codePath = block.codePath.replace(/\/+$/, "")
+    const match = listPages().find(
+      (p) => p.type === "Project" && p.codePath?.replace(/\/+$/, "") === codePath
+    )
+    if (match) return match.relPath
+    return pathFor("Project", slugify(basename(codePath)))
+  }
+  return pathFor(block.type, block.slug)
 }
 
 /** Prompt a session and return concatenated text parts, or null on timeout/failure */

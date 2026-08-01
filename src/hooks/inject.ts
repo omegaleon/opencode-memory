@@ -40,7 +40,7 @@ export function createInjectHook(directory: string): Hooks["experimental.chat.sy
 
       if (cached.toc) {
         output.system.push(
-          "[MEMORY] Wiki pages available — load one with memory_recall(page=\"<path>\"):\n" +
+          "[MEMORY] Persistent wiki index:\n" +
           cached.toc +
           "\nBefore claiming you lack knowledge or access for a task (credentials, " +
           "APIs, debugging steps, deployment details), check relevant pages via memory_recall."

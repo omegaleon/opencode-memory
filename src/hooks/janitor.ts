@@ -4,6 +4,7 @@ import { buildTranscript } from "../lib/transcript.js"
 import { distillTranscript } from "../lib/distill.js"
 import { readState, writeState } from "../lib/state.js"
 import { maybeCommit } from "../lib/git.js"
+import { isBootstrapRunning } from "../lib/bootstrap-runner.js"
 
 /** Minimum time between harvests of the same session */
 const HARVEST_MIN_INTERVAL_MS = 30 * 60_000
@@ -29,6 +30,9 @@ export function createJanitorHook(client: PluginInput["client"], directory: stri
 
   return async ({ event }) => {
     if (event.type !== "session.idle") return
+    // Pause while a bootstrap run is active — both drive distillation
+    // children; competing would race merges on the same pages
+    if (isBootstrapRunning()) return
     const sessionID = (event as any).properties?.sessionID
     if (typeof sessionID !== "string" || inFlight.has(sessionID) || ownSessions.has(sessionID)) return
 

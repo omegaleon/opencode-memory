@@ -23,8 +23,11 @@ export interface WikiPage {
 /** Hard cap on body length — forces distillation over accumulation */
 export const MAX_BODY_LINES = 150
 
-/** Character budget for the injected TOC (~800 tokens) */
-export const TOC_CHAR_BUDGET = 3200
+/** Character budget for the injected TOC (~3.5K tokens). A page missing from
+ * the TOC is invisible at recall time, so the budget must fit the corpus:
+ * box-2 acceptance test produced 89 pages / ~12.6K chars of descriptions and
+ * the original 3,200 budget silently hid ~75% of the wiki. */
+export const TOC_CHAR_BUDGET = 14_000
 
 /**
  * Wiki root directory. Overridable via OPENCODE_WIKI_DIR, defaults to ~/wiki.
@@ -206,22 +209,31 @@ export function findProjectPage(directory: string, pages?: WikiPage[]): WikiPage
 /**
  * Derive the TOC from page frontmatter. Never maintained as a file — always
  * generated from what is actually on disk, so it cannot drift.
+ * Compact format: section headers carry the path template once, entries are
+ * bare slugs — saves the repeated "topics/.../overview.md" per line.
  * Topics and projects are listed individually; investigations as a count.
  */
 export function deriveTOC(pages?: WikiPage[]): string {
   const all = pages ?? listPages()
   if (all.length === 0) return ""
 
-  const topics = all.filter((p) => p.type === "Topic")
-  const projects = all.filter((p) => p.type === "Project")
+  const bySlug = (a: WikiPage, b: WikiPage) => a.relPath.localeCompare(b.relPath)
+  const topics = all.filter((p) => p.type === "Topic").sort(bySlug)
+  const projects = all.filter((p) => p.type === "Project").sort(bySlug)
   const investigations = all.filter((p) => p.type === "Investigation")
 
   const lines: string[] = []
-  for (const p of topics) {
-    lines.push(`- ${p.relPath}: ${p.description}`)
+  if (topics.length > 0) {
+    lines.push(`TOPICS — load with memory_recall page="topics/<slug>.md":`)
+    for (const p of topics) {
+      lines.push(`- ${tocSlug(p)}: ${p.description}`)
+    }
   }
-  for (const p of projects) {
-    lines.push(`- ${p.relPath}: ${p.description}`)
+  if (projects.length > 0) {
+    lines.push(`PROJECTS — load with memory_recall page="projects/<slug>/overview.md":`)
+    for (const p of projects) {
+      lines.push(`- ${tocSlug(p)}: ${p.description}`)
+    }
   }
 
   // Enforce the character budget; overflow becomes a pointer, not content
@@ -241,4 +253,14 @@ export function deriveTOC(pages?: WikiPage[]): string {
     out += `(${investigations.length} investigation notes — memory_recall query="..." to search)\n`
   }
   return out.trimEnd()
+}
+
+/** Extract the bare slug used in TOC lines from a page's relPath */
+function tocSlug(page: WikiPage): string {
+  if (page.type === "Project") {
+    const parts = page.relPath.split("/")
+    return parts[1] ?? page.relPath
+  }
+  const file = page.relPath.split("/").pop() ?? page.relPath
+  return file.replace(/\.md$/, "")
 }
