@@ -173,3 +173,46 @@ user yes/no — see open decisions.)
   build time; sqlite fallback exists (schema verified on this box).
 - Bootstrap distillation quality over old/noisy sessions unknown — acceptance
   test on fresh box is the judge.
+
+## Box-2 Acceptance Test — Findings So Far (2026-07-31)
+
+Verified working: install runbook, TOC/empty-wiki response, bootstrap batches,
+resume after user abort (state-file cursors), mutex compiled in, no duplicate
+processing (bootstrapDone 68/68 unique mid-run).
+
+Learned about the host: OpenCode executes queued tool calls SEQUENTIALLY —
+the bootstrap mutex never fires in practice; parallel-call "silence" is the
+model pre-queuing calls in one turn (cosmetic, reports exist as tool results).
+User messages queue behind long tool calls (session turn serialization).
+
+Observed defect: duplicate Project pages for one codebase —
+projects/jira-remindme/ AND projects/jira-remindme-overview/, same code_path,
+different slugs. Parallel-race hypothesis weakened by 0 duplicate processing;
+prime suspect is distiller slug drift across batches.
+
+## PENDING TUNING PASS — BLOCKED until box-2 11-question diagnostic returns
+
+HOLD: no code changes until the diagnostic output is reviewed (user directive).
+
+1. code_path as Project-page identity (distill.ts): incoming Project block
+   whose code_path matches an existing page merges into THAT page regardless
+   of model-chosen slug; derive project slug from basename(code_path).
+   Makes project dupes structurally impossible.
+2. Topic slug discipline: depending on diagnostic #4 (near-duplicate topic
+   slugs), harden distiller prompt and/or add fuzzy slug match at write time.
+3. One-time consolidation of existing duplicate pages on box 2
+   (jira-remindme + whatever diagnostic #3 reveals).
+4. Detached bootstrap (user-approved): memory_bootstrap returns immediately,
+   batch runs fire-and-forget in the plugin (janitor pattern); add instant
+   status probe (remaining count from state + live in-process counters) and
+   a cancel argument checked between sessions. Tradeoffs accepted: no
+   automatic end-of-batch chat report (poll instead); tool-call interrupt no
+   longer stops the run; process exit mid-run relies on existing resumability.
+5. Possibly raise/keep 5-min distill timeout + review FAILED sessions from
+   diagnostic #8.
+
+Diagnostic question list: 11 questions (projects inventory, jira-remindme full
+contents, shared code_paths, topic near-dupes, git log/mtimes creation order,
+state counts, dupe timing, FAILED/rejected lines, shortest+longest pages, TOC
+description char total, subjective best/worst topics) — issued to user, awaiting
+box-2 output.
