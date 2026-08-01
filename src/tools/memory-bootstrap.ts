@@ -10,6 +10,11 @@ import { getWikiDir } from "../lib/wiki.js"
 /** Transcripts below this contain nothing distillable — marked done, no LLM call */
 const MIN_TRANSCRIPT_CHARS = 500
 
+/** Process-wide mutex: models sometimes emit parallel tool calls, and two
+ * concurrent batches would distill the same sessions twice and race the
+ * state file. Second caller bails out immediately instead. */
+let bootstrapRunning = false
+
 export function createMemoryBootstrapTool(client: PluginInput["client"]) {
   return tool({
     description:
@@ -18,7 +23,9 @@ export function createMemoryBootstrapTool(client: PluginInput["client"]) {
       "(topics, investigations, project overviews) by a child session, out-of-band — " +
       "this session's context only receives short progress reports. " +
       "Resumable and idempotent: processed sessions are tracked, so call it repeatedly " +
-      "until it reports 0 remaining. Run on a fresh install to bootstrap memory.",
+      "until it reports 0 remaining. Run on a fresh install to bootstrap memory. " +
+      "STRICTLY ONE CALL AT A TIME: never emit parallel memory_bootstrap calls — wait " +
+      "for each call's report before making the next.",
     args: {
       limit: tool.schema
         .number()
@@ -30,8 +37,18 @@ export function createMemoryBootstrapTool(client: PluginInput["client"]) {
         .describe("Skip sessions with fewer messages than this. Default: 2 (skips empty shells only)."),
     },
     async execute(args, context) {
+      if (bootstrapRunning) {
+        return (
+          "A bootstrap batch is ALREADY RUNNING. Do not start another — wait for " +
+          "the running call to return its report, then call memory_bootstrap again " +
+          "if sessions remain."
+        )
+      }
+      bootstrapRunning = true
+
       const db = await openDb()
       if (!db) {
+        bootstrapRunning = false
         return (
           "Bootstrap unavailable: could not open OpenCode's session database " +
           "(~/.local/share/opencode/opencode.db). This machine may store sessions " +
@@ -116,6 +133,7 @@ export function createMemoryBootstrapTool(client: PluginInput["client"]) {
             : `All ${all.length} historical sessions processed. Wiki: ${getWikiDir()}`,
         ].join("\n")
       } finally {
+        bootstrapRunning = false
         try {
           db.close()
         } catch {}
