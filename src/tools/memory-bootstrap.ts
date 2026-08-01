@@ -25,7 +25,9 @@ export function createMemoryBootstrapTool(client: PluginInput["client"]) {
       "Resumable and idempotent: processed sessions are tracked, so call it repeatedly " +
       "until it reports 0 remaining. Run on a fresh install to bootstrap memory. " +
       "STRICTLY ONE CALL AT A TIME: never emit parallel memory_bootstrap calls — wait " +
-      "for each call's report before making the next.",
+      "for each call's report before making the next. Between calls, relay the batch " +
+      "report to the user (sessions processed, pages written, remaining count) so they " +
+      "can follow progress.",
     args: {
       limit: tool.schema
         .number()
