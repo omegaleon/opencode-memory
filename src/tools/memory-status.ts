@@ -112,17 +112,26 @@ export function createMemoryStatusTool() {
         }
       }
 
-      // Index health — truncation must never be silent
-      const toc = deriveTOC(pages)
-      const omitted = tocTruncationCount(pages)
+      // Index health. Must mirror what the injection hook actually builds:
+      // consolidated investigations are deliberately excluded there, so
+      // counting them here would over-report omissions.
+      const indexPages = pages.filter((p) => !(p.type === "Investigation" && consolidated.has(p.relPath)))
+      const demoted = pages.length - indexPages.length
+      const toc = deriveTOC(indexPages)
+      const omitted = tocTruncationCount(indexPages)
       lines.push(
         "",
-        `Injected index: ${toc.length} chars of a ${TOC_CHAR_BUDGET} budget.` +
+        `Injected index: ${toc.length} chars of a ${TOC_CHAR_BUDGET} budget, ` +
+          `${indexPages.length} page(s) listed` +
+          (demoted > 0
+            ? ` (${demoted} consolidated investigation(s) excluded — their technique is in topics, ` +
+              `originals still searchable).`
+            : ".") +
           (omitted > 0
             ? ` WARNING: ${omitted} page(s) omitted — they exist but the model never sees them ` +
               `in the index (only findable via memory_recall search). Raise the budget with ` +
               `OPENCODE_WIKI_TOC_BUDGET, or prune duplicates.`
-            : " All pages fit.")
+            : " All listed pages fit.")
       )
 
       return lines.join("\n")

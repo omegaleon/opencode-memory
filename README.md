@@ -241,6 +241,13 @@ npm run build        # Build to dist/
 
 Newest first, stamped in UTC. See `git log` for full detail.
 
+### 2026-08-02T20:02Z — status/index consistency
+
+- `memory_status` was computing index truncation over *all* pages while the
+  injection hook excludes consolidated investigations, so it over-reported
+  omissions. Status now mirrors exactly what gets injected and reports how
+  many investigations were excluded.
+
 ### 2026-08-02T19:56Z — index sizing, duplicate detection, pruning
 
 - **Fixed premature index truncation.** The per-section budget split the total
