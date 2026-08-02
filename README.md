@@ -204,6 +204,85 @@ npm run typecheck    # Type-check without emitting
 npm run build        # Build to dist/
 ```
 
+## Changelog
+
+Newest first. Dates are commit dates; see `git log` for detail.
+
+### 2026-08-02
+
+- **Background job runner** (`bcb42cb`) — `memory_consolidate` no longer runs
+  inline. Both long-running jobs (bootstrap, consolidate) share one detached
+  runner with `action=start|status|cancel`; a job returns control to the
+  session immediately and checkpoints per item. One job at a time process-wide;
+  the janitor pauses while any job runs.
+- **Credential redaction, investigation promotion, status tool** (`dd1b836`)
+  - Secrets are stripped at `writePage`, the single write choke point.
+    Deliberately narrow: AWS keys, private-key blocks, JWT/bearer tokens,
+    vendor API keys, URL and assigned passwords. Account IDs, ARNs, bucket
+    names, hostnames and env-var *names* are never touched. Redactions are
+    always reported, never silent.
+  - Investigations are listed individually in the injected index (previously a
+    bare count, which buried reusable technique), and the distiller must now
+    dual-extract: the Investigation narrative **and** a standalone Topic
+    carrying the technique.
+  - New `memory_consolidate` mines pre-existing investigations for technique
+    (purely additive — never modifies or deletes an investigation).
+  - New `memory_status`: page counts, recent writes, whether this session has
+    been harvested, sessions pending a sweep, index-budget health.
+  - Distiller improvements: candidate pages injected in full before generation,
+    anti-rot rules, no-credentials rule, contradiction/supersession handling.
+  - `source_sessions` provenance frontmatter; `memory_recall` `type`/`tag`
+    filters; `listPages()` cached with invalidate-on-write.
+
+### 2026-08-01
+
+- **Stronger recall rule** (`0acef33`) — the injected rule now fires on topic
+  match, not only when the model is about to claim ignorance.
+- **Tuning pass from the box-2 acceptance test** (`45ef661`)
+  - Project page identity is `code_path`, not the model-chosen slug — fixes
+    duplicate pages for one repo.
+  - Index budget raised 3,200 → 14,000 chars with a compact sectioned format;
+    the old budget silently hid ~75% of an 89-page wiki.
+  - Bootstrap detached with `start|status|cancel`.
+
+### 2026-07-31 — v2 rewrite
+
+- **Wiki-style memory** (`7390795`) — replaced v1 entirely. Derived TOC
+  injection, `code_path`-matched project overviews, idle-triggered background
+  janitor, full session-history bootstrap, validated `memory_write`
+  (frontmatter + 150-line cap + replace-only semantics). Removed v1's
+  10K/60%/80% save nagging, snapshot-append session files, and `memory_seed`.
+- Install runbook in this README (`93c8a9b`); concurrency guard and progress
+  relay for bootstrap (`b5d02c2`, `0ff49d3`).
+
+### 2026-02-23 — v1 (superseded)
+
+Chronological session logs in `~/.config/opencode/memory/MEMORY.md` plus
+per-project session files, with in-session save reminders at 10K-token and
+60%/80% context thresholds. The reminders fired on every request past the
+threshold and blew up context windows; the whole approach was removed in v2.
+
+## Design sources
+
+This plugin borrows deliberately. Credit where it is due:
+
+- **The OKF / Obsidian vault pattern** — YAML frontmatter with
+  `type`/`title`/`description`/`tags`/`timestamp`, plain markdown as the
+  storage format, a vault browsable in Obsidian and versioned in git.
+- **A colleague's personal engineering wiki** — the two-tier split between
+  per-codebase project pages and cross-project platform knowledge, the
+  `code_path` field mapping a wiki page to a repo, and the
+  investigation → runbook promotion ladder. These are the best ideas in the
+  design; this plugin's contribution is enforcing them in code rather than in
+  prose instructions.
+- **Researched systems** — mem0 (extraction pipeline, anti-rot prompt rules,
+  candidate-context lookup), Letta/MemGPT (git-versioned markdown memory,
+  store pointers not retellings), basic-memory (frontmatter as a filterable
+  index), Anthropic's Claude Code memory (index file + on-demand topic files,
+  and its explicit guidance that credential stripping is the implementer's
+  job). Full comparison and the explicit reject list — vector DB, knowledge
+  graph, wikilinks, hard TTLs — are in `RESEARCH-memory-systems.md`.
+
 ## License
 
 MIT
