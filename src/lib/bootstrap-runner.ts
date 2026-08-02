@@ -5,68 +5,20 @@ import { distillTranscript } from "./distill.js"
 import { readState, writeState } from "./state.js"
 import { maybeCommit } from "./git.js"
 import { getWikiDir } from "./wiki.js"
+import { startJob, jobStatus, type JobItem, type JobItemResult } from "./job-runner.js"
 
 /** Transcripts below this contain nothing distillable — marked done, no LLM call */
 const MIN_TRANSCRIPT_CHARS = 500
-/** Recent per-session results kept for status display */
-const RECENT_RESULTS_MAX = 10
-
-interface RunnerState {
-  running: boolean
-  cancelRequested: boolean
-  startedAt: number
-  finishedAt: number
-  processed: number
-  pagesWritten: number
-  skipped: number
-  failed: number
-  planned: number
-  current: string
-  recent: string[]
-  endReason: string
-}
 
 /**
- * Detached bootstrap runner. The tool call returns immediately; the batch
- * runs fire-and-forget in the plugin process (same pattern as the janitor),
- * checkpointing per session into {wiki}/.memory-state.json. The session
- * stays free for questions; progress is polled via status().
- *
- * Process-wide singleton: one run at a time; the janitor pauses while a
- * run is active (both drive distillation children — no point competing).
- */
-const runner: RunnerState = {
-  running: false,
-  cancelRequested: false,
-  startedAt: 0,
-  finishedAt: 0,
-  processed: 0,
-  pagesWritten: 0,
-  skipped: 0,
-  failed: 0,
-  planned: 0,
-  current: "",
-  recent: [],
-  endReason: "",
-}
-
-export function isBootstrapRunning(): boolean {
-  return runner.running
-}
-
-/**
- * Start a detached run. Returns a user-facing message; never throws.
- * excludeSessionID is the live session that invoked the tool.
+ * Start a detached bootstrap run over this machine's session history.
+ * Returns a user-facing message; never throws.
  */
 export async function startBootstrap(
   client: PluginInput["client"],
   excludeSessionID: string,
   opts: { limit?: number; minMessages?: number }
 ): Promise<string> {
-  if (runner.running) {
-    return "A bootstrap run is ALREADY ACTIVE — check it with action=\"status\", stop it with action=\"cancel\"."
-  }
-
   const db = await openDb()
   if (!db) {
     return (
@@ -82,181 +34,101 @@ export async function startBootstrap(
   const pending = all.filter((s) => !done.has(s.id))
 
   if (pending.length === 0) {
-    try {
-      db.close()
-    } catch {}
+    closeQuietly(db)
     return `Bootstrap complete. ${all.length} session(s) total, all processed. Wiki: ${getWikiDir()}`
   }
 
   const batch = opts.limit != null ? pending.slice(0, opts.limit) : pending
   const minMessages = opts.minMessages ?? 2
+  const byID = new Map(batch.map((s) => [s.id, s]))
 
-  // Reset counters and mark running BEFORE detaching
-  runner.running = true
-  runner.cancelRequested = false
-  runner.startedAt = Date.now()
-  runner.finishedAt = 0
-  runner.processed = 0
-  runner.pagesWritten = 0
-  runner.skipped = 0
-  runner.failed = 0
-  runner.planned = batch.length
-  runner.current = ""
-  runner.recent = []
-  runner.endReason = ""
+  const items: JobItem[] = batch.map((s) => ({
+    id: s.id,
+    label: `${s.id.slice(0, 12)} (${s.title || "untitled"})`,
+  }))
 
-  // Fire-and-forget: intentionally not awaited
-  void runLoop(client, db, batch, minMessages, excludeSessionID)
+  const worker = async (item: JobItem): Promise<JobItemResult> => {
+    const session = byID.get(item.id)!
+
+    if (session.messageCount < minMessages) {
+      markBootstrapped(session.id)
+      return { outcome: "skipped", detail: `skipped (only ${session.messageCount} messages)` }
+    }
+
+    const messages = getSessionMessages(db, session.id)
+    const transcript = buildTranscript(messages)
+    if (transcript.text.length < MIN_TRANSCRIPT_CHARS) {
+      markBootstrapped(session.id)
+      return { outcome: "skipped", detail: "skipped (trivial transcript)" }
+    }
+
+    const report = await distillTranscript(client, {
+      transcript: transcript.text,
+      directory: session.directory,
+      parentSessionID: excludeSessionID,
+      sourceSessionID: session.id,
+      onPluginSession: recordPluginSession,
+    })
+
+    if (!report) {
+      // Not marked done — retried on a future run
+      return { outcome: "failed", detail: "FAILED (will retry on next run)" }
+    }
+
+    markBootstrapped(session.id)
+    if (report.written.length > 0) {
+      maybeCommit(`memory: bootstrap ${session.id.slice(0, 12)} (${report.written.length} page write(s))`)
+    }
+    return {
+      outcome: "written",
+      pages: report.written.length,
+      detail: [
+        report.written.length > 0 ? `wrote ${report.written.join(", ")}` : "nothing durable",
+        ...report.skipped.map((s) => `rejected ${s}`),
+        ...report.redacted.map((r) => `REDACTED ${r}`),
+      ].join("; "),
+    }
+  }
+
+  const started = startJob("bootstrap", items, worker, () => closeQuietly(db))
+  if (!started) {
+    closeQuietly(db)
+    return (
+      "A background memory job is ALREADY RUNNING. Check it with " +
+      'memory_bootstrap action="status", or stop it with action="cancel".'
+    )
+  }
 
   return (
     `Bootstrap started in the background — ${batch.length} session(s) queued ` +
     `(${pending.length} pending total${opts.limit != null ? `, limited to ${batch.length}` : ""}). ` +
     `This session stays free. Check progress anytime with memory_bootstrap action="status"; ` +
-    `stop with action="cancel". Progress also visible in ${getWikiDir()}/.memory-state.json.`
+    `stop with action="cancel".`
   )
 }
 
-/** Instant progress report — safe to call any time, running or not */
+/** Progress report including overall history coverage */
 export async function bootstrapStatus(): Promise<string> {
   const state = readState()
   const doneCount = state.bootstrapDone.length
 
-  let totalKnown = ""
+  let overall = ""
   const db = await openDb()
   if (db) {
     try {
       const total = listHistorySessions(db).length
-      totalKnown = ` Overall: ${doneCount}/${total} historical sessions processed.`
+      const pending = Math.max(0, total - doneCount)
+      overall =
+        `Overall: ${doneCount}/${total} historical sessions distilled` +
+        (pending > 0 ? ` — ${pending} pending.` : " — up to date.")
     } catch {}
-    try {
-      db.close()
-    } catch {}
+    closeQuietly(db)
   }
 
-  if (!runner.running) {
-    const last =
-      runner.finishedAt > 0
-        ? ` Last run: ${runner.processed} processed, ${runner.pagesWritten} page write(s), ` +
-          `${runner.skipped} skipped, ${runner.failed} failed — ${runner.endReason}.`
-        : ""
-    return `No bootstrap run active.${last}${totalKnown}`
-  }
-
-  const elapsed = Math.round((Date.now() - runner.startedAt) / 1000)
-  const lines = [
-    `Bootstrap RUNNING (${elapsed}s elapsed) — ${runner.processed}/${runner.planned} this run: ` +
-      `${runner.pagesWritten} page write(s), ${runner.skipped} skipped, ${runner.failed} failed.`,
-    runner.current ? `Currently distilling: ${runner.current}` : "",
-    runner.cancelRequested ? "CANCEL REQUESTED — stopping after the current session." : "",
-    runner.recent.length > 0 ? "Recent:" : "",
-    ...runner.recent,
-    totalKnown.trim(),
-  ]
-  return lines.filter(Boolean).join("\n")
+  return jobStatus(overall)
 }
 
-/** Request a stop; honored between sessions, current distillation finishes */
-export function cancelBootstrap(): string {
-  if (!runner.running) {
-    return "No bootstrap run active — nothing to cancel."
-  }
-  runner.cancelRequested = true
-  return (
-    "Cancel requested. The run will stop after the session currently being " +
-    "distilled finishes (its progress is checkpointed). Restart later with " +
-    "action=\"start\" — it resumes where it left off."
-  )
-}
-
-async function runLoop(
-  client: PluginInput["client"],
-  db: any,
-  batch: Array<{ id: string; directory: string; title: string; messageCount: number }>,
-  minMessages: number,
-  parentSessionID: string
-): Promise<void> {
-  try {
-    for (const session of batch) {
-      if (runner.cancelRequested) {
-        runner.endReason = "cancelled"
-        return
-      }
-
-      const label = `${session.id.slice(0, 12)} (${session.title || "untitled"})`
-      runner.current = label
-
-      try {
-        if (session.messageCount < minMessages) {
-          markDone(session.id)
-          runner.processed++
-          runner.skipped++
-          pushRecent(`- ${label}: skipped (only ${session.messageCount} messages)`)
-          continue
-        }
-
-        const messages = getSessionMessages(db, session.id)
-        const transcript = buildTranscript(messages)
-        if (transcript.text.length < MIN_TRANSCRIPT_CHARS) {
-          markDone(session.id)
-          runner.processed++
-          runner.skipped++
-          pushRecent(`- ${label}: skipped (trivial transcript)`)
-          continue
-        }
-
-        const report = await distillTranscript(client, {
-          transcript: transcript.text,
-          directory: session.directory,
-          parentSessionID,
-          sourceSessionID: session.id,
-          onPluginSession: (id) => {
-            const s = readState()
-            s.pluginSessions.push(id)
-            writeState(s)
-          },
-        })
-
-        if (!report) {
-          // Timeout/error — not marked done, retried on a future run
-          runner.processed++
-          runner.failed++
-          pushRecent(`- ${label}: FAILED (will retry on next run)`)
-          continue
-        }
-
-        markDone(session.id)
-        runner.processed++
-        runner.pagesWritten += report.written.length
-        const detail = [
-          report.written.length > 0 ? `wrote ${report.written.join(", ")}` : "nothing durable",
-          ...report.skipped.map((s) => `rejected ${s}`),
-          ...report.redacted.map((r) => `REDACTED ${r}`),
-        ].join("; ")
-        pushRecent(`- ${label}: ${detail}`)
-
-        if (report.written.length > 0) {
-          maybeCommit(`memory: bootstrap ${session.id.slice(0, 12)} (${report.written.length} page write(s))`)
-        }
-      } catch {
-        runner.processed++
-        runner.failed++
-        pushRecent(`- ${label}: FAILED (unexpected error)`)
-      }
-    }
-    runner.endReason = "completed"
-  } catch {
-    runner.endReason = "aborted (unexpected error)"
-  } finally {
-    runner.running = false
-    runner.current = ""
-    runner.finishedAt = Date.now()
-    try {
-      db.close()
-    } catch {}
-  }
-}
-
-function markDone(sessionID: string): void {
+function markBootstrapped(sessionID: string): void {
   const s = readState()
   if (!s.bootstrapDone.includes(sessionID)) {
     s.bootstrapDone.push(sessionID)
@@ -264,9 +136,14 @@ function markDone(sessionID: string): void {
   }
 }
 
-function pushRecent(line: string): void {
-  runner.recent.push(line)
-  if (runner.recent.length > RECENT_RESULTS_MAX) {
-    runner.recent.shift()
-  }
+function recordPluginSession(id: string): void {
+  const s = readState()
+  s.pluginSessions.push(id)
+  writeState(s)
+}
+
+function closeQuietly(db: any): void {
+  try {
+    db.close()
+  } catch {}
 }

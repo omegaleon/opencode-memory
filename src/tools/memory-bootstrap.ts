@@ -1,6 +1,7 @@
 import { tool } from "@opencode-ai/plugin/tool"
 import type { PluginInput } from "@opencode-ai/plugin"
-import { startBootstrap, bootstrapStatus, cancelBootstrap } from "../lib/bootstrap-runner.js"
+import { startBootstrap, bootstrapStatus } from "../lib/bootstrap-runner.js"
+import { cancelJob } from "../lib/job-runner.js"
 
 export function createMemoryBootstrapTool(client: PluginInput["client"]) {
   return tool({
@@ -30,7 +31,7 @@ export function createMemoryBootstrapTool(client: PluginInput["client"]) {
     async execute(args, context) {
       const action = args.action ?? "start"
       if (action === "status") return bootstrapStatus()
-      if (action === "cancel") return cancelBootstrap()
+      if (action === "cancel") return cancelJob()
       return startBootstrap(client, context.sessionID, {
         limit: args.limit,
         minMessages: args.min_messages,

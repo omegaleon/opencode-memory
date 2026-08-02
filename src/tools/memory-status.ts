@@ -2,6 +2,7 @@ import { tool } from "@opencode-ai/plugin/tool"
 import { listPages, deriveTOC, getWikiDir, tocTruncationCount, TOC_CHAR_BUDGET } from "../lib/wiki.js"
 import { readState } from "../lib/state.js"
 import { openDb, listHistorySessions } from "../lib/db.js"
+import { isJobRunning, activeJobKind } from "../lib/job-runner.js"
 
 export function createMemoryStatusTool() {
   return tool({
@@ -34,6 +35,13 @@ export function createMemoryStatusTool() {
         `Wiki: ${wikiDir}`,
         `Pages: ${pages.length} total — ${byType.Topic} topics, ${byType.Project} projects, ${byType.Investigation} investigations`,
       ]
+
+      if (isJobRunning()) {
+        lines.push(
+          `Background job: ${activeJobKind()} RUNNING — call memory_${activeJobKind()} ` +
+            `action="status" for detail.`
+        )
+      }
 
       // Was THIS session harvested?
       const cursor = state.cursors[context.sessionID]

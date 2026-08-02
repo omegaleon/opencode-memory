@@ -164,8 +164,9 @@ optional; the plugin works identically without them.
   Updates replace the page; the tool rejects oversized or unstructured writes.
 - `memory_bootstrap` — `action=start|status|cancel`; background distillation of
   historical sessions.
-- `memory_consolidate` — promote reusable technique out of investigations into
-  topics (additive; nothing is deleted).
+- `memory_consolidate` — `action=start|status|cancel`; background promotion of
+  reusable technique out of investigations into topics (additive; nothing is
+  deleted).
 - `memory_status` — page counts, recent writes, whether this session has been
   harvested, sessions pending a bootstrap sweep, index-budget health.
 - `context_usage` — current token usage and context limit.

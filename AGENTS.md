@@ -36,6 +36,9 @@ src/
 │   ├── redact.ts          # Narrow credential redaction applied at the write choke point
 │   ├── distill.ts         # Child-session distillation + read-merge-rewrite of pages
 │   ├── transcript.ts      # Compact transcript rendering from session messages
+│   ├── job-runner.ts      # Shared detached runner (one background job at a time)
+│   ├── bootstrap-runner.ts# Bootstrap job: history sweep -> distillation
+│   ├── consolidate-runner.ts # Consolidate job: investigations -> topic promotion
 │   ├── state.ts           # Janitor cursors + bootstrap progress ({wiki}/.memory-state.json)
 │   ├── db.ts              # Read-only bun:sqlite access to OpenCode's session DB (bootstrap)
 │   ├── git.ts             # Optional git commit of wiki writes (no-op without .git)

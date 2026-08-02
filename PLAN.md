@@ -271,3 +271,14 @@ Fix (all additive):
 REJECTED: NONE-verdict on merges (mem0) — risks a lazy skip of a real merge;
 churn saved is not worth any capability risk. Vector DB, knowledge graph,
 wikilinks, schema system, hard TTLs — see RESEARCH file for reasons.
+
+### Follow-up: all long jobs must be detached
+
+memory_consolidate initially shipped inline (5 LLM round-trips per call) —
+same session-occupying flaw the detached bootstrap fixed. Generalized
+bootstrap-runner into lib/job-runner.ts: a single background runner used by
+both jobs, ONE job at a time process-wide (both drive distillation children
+and write the same pages, so concurrent runs would race merges). Janitor
+pauses on isJobRunning(). Both tools expose action=start|status|cancel.
+RULE FOR FUTURE WORK: any tool doing more than one LLM round-trip must run
+through job-runner, never inline.
