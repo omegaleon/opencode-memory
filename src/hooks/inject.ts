@@ -1,5 +1,6 @@
 import type { Hooks, PluginInput } from "@opencode-ai/plugin"
 import { listPages, deriveTOC, findProjectPage } from "../lib/wiki.js"
+import { readState } from "../lib/state.js"
 
 /** Cap on the injected project overview (chars) — overviews are size-capped
  * on disk anyway, this is a second line of defense */
@@ -26,7 +27,22 @@ export function createInjectHook(directory: string): Hooks["experimental.chat.sy
     try {
       if (!cached || Date.now() - cachedAt > SCAN_TTL_MS) {
         const pages = listPages()
-        const toc = deriveTOC(pages)
+
+        // Investigations whose reusable technique has been promoted into
+        // topics are dropped from the index: the durable part is already
+        // listed under TOPICS, so listing the incident too costs index space
+        // for a second copy. The file stays on disk and stays searchable via
+        // memory_recall — this bounds index growth without losing anything.
+        const consolidated = new Set(readState().consolidated ?? [])
+        const demoted = pages.filter((p) => p.type === "Investigation" && consolidated.has(p.relPath))
+        const indexPages = pages.filter((p) => !demoted.includes(p))
+
+        let toc = deriveTOC(indexPages)
+        if (toc && demoted.length > 0) {
+          toc +=
+            `\n(${demoted.length} older investigation(s) not listed — their reusable technique ` +
+            `is in the topics above; search the originals with memory_recall query="...")`
+        }
         const project = findProjectPage(directory, pages)
         let overview = ""
         if (project) {

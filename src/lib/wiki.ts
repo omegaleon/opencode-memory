@@ -1,5 +1,5 @@
-import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs"
-import { dirname, join } from "node:path"
+import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs"
+import { dirname, join, sep } from "node:path"
 import { homedir } from "node:os"
 import { redactSecrets } from "./redact.js"
 
@@ -26,11 +26,17 @@ export interface WikiPage {
 /** Hard cap on body length — forces distillation over accumulation */
 export const MAX_BODY_LINES = 150
 
-/** Character budget for the injected TOC (~3.5K tokens). A page missing from
- * the TOC is invisible at recall time, so the budget must fit the corpus:
- * box-2 acceptance test produced 89 pages / ~12.6K chars of descriptions and
- * the original 3,200 budget silently hid ~75% of the wiki. */
-export const TOC_CHAR_BUDGET = 14_000
+/**
+ * Character budget for the injected TOC. A page missing from the TOC is
+ * effectively invisible — the model never learns it exists — so this is sized
+ * for discoverability, not token thrift: ~60K chars (~15K tokens) holds roughly
+ * 350 pages. Override with OPENCODE_WIKI_TOC_BUDGET if a wiki outgrows it;
+ * memory_status warns whenever anything is omitted.
+ */
+export const TOC_CHAR_BUDGET = (() => {
+  const raw = Number(process.env["OPENCODE_WIKI_TOC_BUDGET"])
+  return Number.isFinite(raw) && raw > 1000 ? raw : 60_000
+})()
 
 /**
  * Wiki root directory. Overridable via OPENCODE_WIKI_DIR, defaults to ~/wiki.
@@ -258,23 +264,41 @@ export function deriveTOC(pages?: WikiPage[]): string {
   // Newest investigations first — recent troubleshooting is likelier relevant
   const investigations = all.filter((p) => p.type === "Investigation").sort((a, b) => b.relPath.localeCompare(a.relPath))
 
-  const sections: Array<{ header: string; pages: WikiPage[] }> = [
+  const sections = [
     { header: `TOPICS — load with memory_recall page="topics/<slug>.md":`, pages: topics },
     { header: `PROJECTS — load with memory_recall page="projects/<slug>/overview.md":`, pages: projects },
     { header: `INVESTIGATIONS — load with memory_recall page="investigations/<name>.md":`, pages: investigations },
   ]
+    .filter((s) => s.pages.length > 0)
+    .map((s) => ({
+      ...s,
+      lines: s.pages.map((p) => `- ${tocSlug(p)}: ${p.description}\n`),
+    }))
 
-  // Budget is enforced per section so no single type can crowd out the others
+  // Max-min fair allocation: sections that need less than an equal share take
+  // only what they need and hand the remainder back, so a small section can
+  // never strand budget that a large one could use. (A naive equal split
+  // truncated topics at 1/3 of the budget while total usage sat well under it.)
+  const allocations = new Map<string, number>()
+  let remaining = TOC_CHAR_BUDGET
+  const ordered = [...sections].sort(
+    (a, b) => need(a.header, a.lines) - need(b.header, b.lines)
+  )
+  ordered.forEach((section, i) => {
+    const share = Math.floor(remaining / (ordered.length - i))
+    const take = Math.min(need(section.header, section.lines), share)
+    allocations.set(section.header, take)
+    remaining -= take
+  })
+
   let out = ""
   let truncated = 0
   for (const section of sections) {
-    if (section.pages.length === 0) continue
-    const share = Math.floor(TOC_CHAR_BUDGET / sections.filter((s) => s.pages.length > 0).length)
-    let used = 0
+    const budget = allocations.get(section.header) ?? 0
+    let used = section.header.length + 1
     let sectionOut = section.header + "\n"
-    for (const p of section.pages) {
-      const line = `- ${tocSlug(p)}: ${p.description}\n`
-      if (used + line.length > share) {
+    for (const line of section.lines) {
+      if (used + line.length > budget) {
         truncated++
         continue
       }
@@ -285,10 +309,15 @@ export function deriveTOC(pages?: WikiPage[]): string {
   }
   if (truncated > 0) {
     out +=
-      `(+${truncated} more pages not shown — TOC budget reached. ` +
-      `memory_recall with no args lists everything; memory_status reports index health)\n`
+      `(+${truncated} page(s) omitted — index budget reached. Find them with ` +
+      `memory_recall query="..."; memory_status reports index health)\n`
   }
   return out.trimEnd()
+}
+
+/** Characters a section needs to render in full */
+function need(header: string, lines: string[]): number {
+  return header.length + 1 + lines.reduce((sum, l) => sum + l.length, 0)
 }
 
 /** Number of pages omitted from the derived TOC (0 when everything fits) */
@@ -296,6 +325,86 @@ export function tocTruncationCount(pages?: WikiPage[]): number {
   const all = pages ?? listPages()
   const shown = deriveTOC(all).split("\n").filter((l) => l.startsWith("- ")).length
   return Math.max(0, all.length - shown)
+}
+
+export interface DuplicateGroup {
+  reason: string
+  pages: string[]
+}
+
+/**
+ * Detect pages that likely describe the same subject. Reported, never acted
+ * on automatically — merging is a judgement call for the model or the user.
+ *
+ * Two signals, both conservative:
+ * - Project pages sharing a code_path (always a genuine duplicate)
+ * - Pages of the same type whose slugs differ only by a generic suffix/prefix
+ *   (overview, notes, guide, setup...) or are equal after removing non-letters
+ */
+const GENERIC_AFFIXES = ["overview", "notes", "guide", "setup", "config", "info", "docs", "summary", "page"]
+
+export function findDuplicates(pages?: WikiPage[]): DuplicateGroup[] {
+  const all = pages ?? listPages()
+  const groups: DuplicateGroup[] = []
+
+  // Project pages documenting the same directory
+  const byCodePath = new Map<string, string[]>()
+  for (const p of all) {
+    if (p.type !== "Project" || !p.codePath) continue
+    const key = p.codePath.replace(/\/+$/, "")
+    byCodePath.set(key, [...(byCodePath.get(key) ?? []), p.relPath])
+  }
+  for (const [codePath, paths] of byCodePath) {
+    if (paths.length > 1) {
+      groups.push({ reason: `same code_path (${codePath})`, pages: paths.sort() })
+    }
+  }
+
+  // Slugs equal after stripping generic affixes and separators
+  const byNormalized = new Map<string, string[]>()
+  for (const p of all) {
+    if (p.type === "Investigation") continue // date-prefixed; expected to differ
+    let slug = tocSlug(p).toLowerCase()
+    for (const affix of GENERIC_AFFIXES) {
+      slug = slug.replace(new RegExp(`[-_]?${affix}$`), "").replace(new RegExp(`^${affix}[-_]?`), "")
+    }
+    const key = `${p.type}:${slug.replace(/[^a-z0-9]/g, "")}`
+    byNormalized.set(key, [...(byNormalized.get(key) ?? []), p.relPath])
+  }
+  for (const [key, paths] of byNormalized) {
+    if (paths.length > 1) {
+      const sorted = paths.sort()
+      // Skip if already reported via code_path
+      if (groups.some((g) => g.pages.join() === sorted.join())) continue
+      groups.push({ reason: `near-identical slug (${key.split(":")[1]})`, pages: sorted })
+    }
+  }
+
+  return groups
+}
+
+/**
+ * Delete a page. Callers MUST confirm with the user first — the prune tool
+ * is dry-run by default and requires an explicit confirm flag.
+ * Returns true if a file was removed.
+ */
+export function deletePage(relPath: string): boolean {
+  try {
+    const filePath = join(getWikiDir(), relPath)
+    if (!existsSync(filePath)) return false
+    rmSync(filePath)
+    // Clean up an emptied projects/<name>/ directory
+    const dir = dirname(filePath)
+    if (dir.includes(`${sep}projects${sep}`) || dir.includes("/projects/")) {
+      try {
+        if (readdirSync(dir).length === 0) rmSync(dir, { recursive: true })
+      } catch {}
+    }
+    invalidatePageCache()
+    return true
+  } catch {
+    return false
+  }
 }
 
 /** Extract the bare slug used in TOC lines from a page's relPath */

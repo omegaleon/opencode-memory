@@ -168,12 +168,45 @@ optional; the plugin works identically without them.
   reusable technique out of investigations into topics (additive; nothing is
   deleted).
 - `memory_status` — page counts, recent writes, whether this session has been
-  harvested, sessions pending a bootstrap sweep, index-budget health.
+  harvested, sessions pending a bootstrap sweep, duplicate groups, index-budget
+  health.
+- `memory_prune` — report duplicate/overlapping pages; delete one after
+  explicit user approval (dry run by default).
 - `context_usage` — current token usage and context limit.
+
+## Index sizing and growth
+
+The injected index carries one line per page (`slug: description`), averaging
+~160 chars / ~40 tokens. The budget is **60,000 chars (~15K tokens, ~350
+pages)** — a few percent of a modern context window, spent on the one thing
+that makes the wiki work: a page missing from the index is a page the model
+never learns exists.
+
+Growth is bounded by **distinct subjects, not session count**:
+
+- **Topics merge instead of multiplying.** Before writing, the distiller is
+  shown the index plus the full content of the pages most likely to match, and
+  is required to merge rather than create near-duplicates. Ten sessions about
+  Cribl backpressure converge on one page.
+- **Project pages are keyed on `code_path`**, so one repo can only ever have
+  one overview no matter what slug a distiller invents.
+- **Investigations leave the index once consolidated.** `memory_consolidate`
+  promotes their reusable technique into topics; the incident file stays on
+  disk and stays searchable, but stops occupying index space. This is what
+  keeps per-session artifacts from accumulating in the always-loaded surface.
+- **Duplicates are detected and prunable.** `memory_status` reports pages
+  sharing a `code_path` or differing only by a generic slug affix;
+  `memory_prune` removes the leftover after you approve a merge.
+
+If the index ever exceeds budget, `memory_status` says so explicitly (pages
+are never dropped silently). Raise it with `OPENCODE_WIKI_TOC_BUDGET`, or
+consolidate and prune to reclaim space.
 
 ## Configuration
 
 - `OPENCODE_WIKI_DIR` — wiki location (default `~/wiki`).
+- `OPENCODE_WIKI_TOC_BUDGET` — max chars for the injected index
+  (default `60000`).
 - **Git (optional)** — if the wiki dir is a git repo, every write is committed
   (`git init ~/wiki` to enable; skip it and nothing changes).
 - **Obsidian (optional)** — open the wiki dir as a vault to browse/search/graph it.
@@ -206,9 +239,34 @@ npm run build        # Build to dist/
 
 ## Changelog
 
-Newest first. Dates are commit dates; see `git log` for detail.
+Newest first, stamped in UTC. See `git log` for full detail.
 
-### 2026-08-02
+### 2026-08-02T19:56Z — index sizing, duplicate detection, pruning
+
+- **Fixed premature index truncation.** The per-section budget split the total
+  evenly across page types, so a wiki with many topics and few projects
+  truncated topics at ~1/3 of the budget while total usage still looked low
+  (box 2 reported 11,963/14,000 chars *with 86 pages omitted*). Replaced with
+  max-min fair allocation: sections needing less than an equal share take only
+  what they need and hand the rest back. Measured after the fix: 174 pages →
+  0 omitted; 454 pages → 100% budget utilization with every section present.
+- **Index budget 14,000 → 60,000 chars** (~15K tokens, ~350 pages) and
+  overridable with `OPENCODE_WIKI_TOC_BUDGET`. The old value was fitted to a
+  one-time measurement of box 2's wiki rather than derived from anything.
+- **Consolidated investigations drop out of the index.** Once an
+  investigation's reusable technique has been promoted into topics, listing
+  the incident too spends index space on a second copy. The file stays on
+  disk and stays searchable via `memory_recall`. This is the main brake on
+  index growth — bounded by *distinct topics*, not by session count.
+- **`memory_status` reports duplicates**: project pages sharing a `code_path`,
+  and same-type pages whose slugs differ only by a generic affix
+  (`-overview`, `-notes`, `-guide`…).
+- **New `memory_prune` tool** — the wiki had no delete path, so duplicates
+  were unresolvable. Dry run by default: it returns the page's full content
+  for review and refuses to delete without an explicit `confirm=true` after
+  user approval.
+
+### 2026-08-02T18:30Z
 
 - **Background job runner** (`bcb42cb`) — `memory_consolidate` no longer runs
   inline. Both long-running jobs (bootstrap, consolidate) share one detached
@@ -234,7 +292,7 @@ Newest first. Dates are commit dates; see `git log` for detail.
   - `source_sessions` provenance frontmatter; `memory_recall` `type`/`tag`
     filters; `listPages()` cached with invalidate-on-write.
 
-### 2026-08-01
+### 2026-08-01T22:00Z
 
 - **Stronger recall rule** (`0acef33`) — the injected rule now fires on topic
   match, not only when the model is about to claim ignorance.
@@ -245,7 +303,7 @@ Newest first. Dates are commit dates; see `git log` for detail.
     the old budget silently hid ~75% of an 89-page wiki.
   - Bootstrap detached with `start|status|cancel`.
 
-### 2026-07-31 — v2 rewrite
+### 2026-07-31T21:30Z — v2 rewrite
 
 - **Wiki-style memory** (`7390795`) — replaced v1 entirely. Derived TOC
   injection, `code_path`-matched project overviews, idle-triggered background
@@ -255,7 +313,7 @@ Newest first. Dates are commit dates; see `git log` for detail.
 - Install runbook in this README (`93c8a9b`); concurrency guard and progress
   relay for bootstrap (`b5d02c2`, `0ff49d3`).
 
-### 2026-02-23 — v1 (superseded)
+### 2026-02-23T00:00Z — v1 (superseded)
 
 Chronological session logs in `~/.config/opencode/memory/MEMORY.md` plus
 per-project session files, with in-session save reminders at 10K-token and

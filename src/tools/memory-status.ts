@@ -1,5 +1,12 @@
 import { tool } from "@opencode-ai/plugin/tool"
-import { listPages, deriveTOC, getWikiDir, tocTruncationCount, TOC_CHAR_BUDGET } from "../lib/wiki.js"
+import {
+  listPages,
+  deriveTOC,
+  getWikiDir,
+  tocTruncationCount,
+  findDuplicates,
+  TOC_CHAR_BUDGET,
+} from "../lib/wiki.js"
 import { readState } from "../lib/state.js"
 import { openDb, listHistorySessions } from "../lib/db.js"
 import { isJobRunning, activeJobKind } from "../lib/job-runner.js"
@@ -96,6 +103,15 @@ export function createMemoryStatusTool() {
         )
       }
 
+      // Duplicate detection — reported, never auto-resolved
+      const duplicates = findDuplicates(pages)
+      if (duplicates.length > 0) {
+        lines.push("", `Possible duplicates: ${duplicates.length} group(s) — run memory_prune to review:`)
+        for (const g of duplicates) {
+          lines.push(`- ${g.pages.join("  +  ")}  [${g.reason}]`)
+        }
+      }
+
       // Index health — truncation must never be silent
       const toc = deriveTOC(pages)
       const omitted = tocTruncationCount(pages)
@@ -103,7 +119,9 @@ export function createMemoryStatusTool() {
         "",
         `Injected index: ${toc.length} chars of a ${TOC_CHAR_BUDGET} budget.` +
           (omitted > 0
-            ? ` WARNING: ${omitted} page(s) omitted from the index — they are only findable via memory_recall search. Raise TOC_CHAR_BUDGET in lib/wiki.ts.`
+            ? ` WARNING: ${omitted} page(s) omitted — they exist but the model never sees them ` +
+              `in the index (only findable via memory_recall search). Raise the budget with ` +
+              `OPENCODE_WIKI_TOC_BUDGET, or prune duplicates.`
             : " All pages fit.")
       )
 

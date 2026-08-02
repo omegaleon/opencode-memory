@@ -5,6 +5,7 @@ import { createMemoryWriteTool } from "./tools/memory-write.js"
 import { createMemoryBootstrapTool } from "./tools/memory-bootstrap.js"
 import { createMemoryConsolidateTool } from "./tools/memory-consolidate.js"
 import { createMemoryStatusTool } from "./tools/memory-status.js"
+import { createMemoryPruneTool } from "./tools/memory-prune.js"
 import { createInjectHook } from "./hooks/inject.js"
 import { createJanitorHook } from "./hooks/janitor.js"
 import { createCompactionHook } from "./hooks/compaction.js"
@@ -29,6 +30,7 @@ export const MemoryPlugin: Plugin = async ({ client, directory }) => {
       memory_bootstrap: createMemoryBootstrapTool(client),
       memory_consolidate: createMemoryConsolidateTool(client, directory),
       memory_status: createMemoryStatusTool(),
+      memory_prune: createMemoryPruneTool(),
     },
 
     // Background janitor: harvest transcript deltas on session.idle
