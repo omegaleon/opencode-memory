@@ -17,6 +17,8 @@ export interface MemoryState {
   bootstrapDone: string[]
   /** Child session IDs created by this plugin (never harvested) */
   pluginSessions: string[]
+  /** Investigation page paths already swept by memory_consolidate */
+  consolidated?: string[]
 }
 
 const STATE_FILE = ".memory-state.json"
@@ -31,6 +33,7 @@ export function readState(): MemoryState {
       cursors: parsed.cursors ?? {},
       bootstrapDone: parsed.bootstrapDone ?? [],
       pluginSessions: parsed.pluginSessions ?? [],
+      consolidated: parsed.consolidated ?? [],
     }
   } catch {
     return emptyState()
@@ -52,5 +55,5 @@ export function writeState(state: MemoryState): void {
 }
 
 function emptyState(): MemoryState {
-  return { cursors: {}, bootstrapDone: [], pluginSessions: [] }
+  return { cursors: {}, bootstrapDone: [], pluginSessions: [], consolidated: [] }
 }

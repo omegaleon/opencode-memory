@@ -37,6 +37,19 @@ Knowledge capture never spends your session's context:
 Pages are validated on write: frontmatter required, one-line description required,
 body capped at 150 lines. Distill, don't narrate.
 
+**Credentials never reach disk.** Every write passes through a redaction filter
+(AWS keys, private key blocks, bearer tokens/JWTs, vendor API keys, passwords in
+URLs or assignments). It is deliberately narrow — account IDs, ARNs, bucket names,
+hostnames and env-var *names* are valuable content and are left untouched — and
+every redaction is reported in the write result, never silent.
+
+**Investigations feed topics.** An incident write-up usually contains technique
+that outlives it (query scoping rules, tool flags, access patterns). The distiller
+is required to emit both: the Investigation for the narrative *and* a Topic
+carrying the reusable part, standalone. `memory_consolidate` does the same sweep
+retroactively over investigations that predate this behaviour — it only ever adds
+or merges topics, and never modifies or deletes an investigation.
+
 ## Installation
 
 These steps are written so that an OpenCode agent can execute them directly
@@ -146,10 +159,15 @@ optional; the plugin works identically without them.
 ## Tools
 
 - `memory_recall` — no args: list all pages. `query`: keyword search.
-  `page`: load one page in full.
+  `page`: load one page in full. `type` / `tag`: filters.
 - `memory_write` — create or update a page (`Topic` / `Investigation` / `Project`).
   Updates replace the page; the tool rejects oversized or unstructured writes.
-- `memory_bootstrap` — batch-distill historical sessions into the wiki.
+- `memory_bootstrap` — `action=start|status|cancel`; background distillation of
+  historical sessions.
+- `memory_consolidate` — promote reusable technique out of investigations into
+  topics (additive; nothing is deleted).
+- `memory_status` — page counts, recent writes, whether this session has been
+  harvested, sessions pending a bootstrap sweep, index-budget health.
 - `context_usage` — current token usage and context limit.
 
 ## Configuration

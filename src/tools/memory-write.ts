@@ -57,8 +57,9 @@ export function createMemoryWriteTool() {
         body: args.content,
       }
 
+      let redacted: string[]
       try {
-        writePage(page)
+        redacted = writePage(page)
       } catch (err) {
         return `REJECTED: ${err instanceof Error ? err.message : err}`
       }
@@ -69,6 +70,10 @@ export function createMemoryWriteTool() {
       return (
         `${action} ${relPath}\n` +
         `Its description now appears in the index injected into every session.` +
+        (redacted.length > 0
+          ? `\nCREDENTIALS REDACTED before writing (${redacted.join(", ")}) — the page stores ` +
+            `placeholders instead. Record where a secret lives, never its value.`
+          : "") +
         (existing ? "" : "\nNote: if a similar page already existed under a different slug, consider consolidating.")
       )
     },

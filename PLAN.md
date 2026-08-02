@@ -223,3 +223,51 @@ Shipped in this pass:
 
 Remaining known-good-enough: 5-min distill timeout unchanged (zero timeouts
 observed across 139 sessions).
+
+## TUNING PASS 2 — code review + research (RESEARCH-memory-systems.md)
+
+Hard constraint from user: NO change may reduce capability. Token cost is
+explicitly NOT a concern. No sharing/publishing tech for now.
+
+Architecture validated by research: Letta ships no vector DB by default,
+basic-memory ships semantic search off by default, Claude Code = MEMORY.md
+index + on-demand topic files (same shape as our derived TOC). Cline's
+read-all-memory-every-task is v1's blowup restated. => no vector DB, no
+knowledge graph, no wikilinks. Lean design confirmed correct.
+
+### Defect: investigations are a knowledge graveyard (user-identified)
+
+An investigation (e.g. missing Slack logs) yields durable technique (event-time
+vs wall-clock scoping, S3 query patterns) mixed into narrative. Today that
+technique is (a) not in the TOC — investigations show only as a count, and
+(b) never forced into a Topic page. Captured, then buried. Friend-2's
+"promote investigation -> runbook" step was manual and never happens.
+
+Fix (all additive):
+1. Investigations listed in the TOC with descriptions (own section).
+2. Distiller MUST dual-extract: investigation keeps the narrative AND the
+   reusable technique goes to a Topic page, cross-linked.
+3. memory_consolidate tool: retroactively sweep existing investigations,
+   extract technique into Topics. Harvesting, NOT pruning — nothing deleted.
+
+### Other changes
+
+- Secret redaction at writePage (the single write choke point). NARROW by
+  design: only AKIA keys, PRIVATE KEY blocks, bearer/authorization tokens,
+  passwords in URLs, sk-style API keys. NEVER account IDs, ARNs, bucket
+  names, hostnames, usernames — those are valuable content. Every redaction
+  reported in the write result; nothing vanishes silently.
+- memory_status tool: last harvests, page counts by type, sessions pending
+  sweep, TOC size vs budget (answers "did anything get saved from my session").
+- Distiller prompt: mem0 v3 anti-rot rules (existing page != everything
+  captured; no detail contamination; no meta-extraction), candidate-page
+  injection before generation, explicit no-credentials rule.
+- listPages() caching with invalidate-on-write (resolveRelPath currently
+  re-reads every page per distilled block). Zero behavior change.
+- memory_recall filters: type/tag (optional args, default behavior unchanged).
+- source_sessions frontmatter: provenance pointers, not retellings (Letta).
+- TOC truncation must be visible (surface in memory_status).
+
+REJECTED: NONE-verdict on merges (mem0) — risks a lazy skip of a real merge;
+churn saved is not worth any capability risk. Vector DB, knowledge graph,
+wikilinks, schema system, hard TTLs — see RESEARCH file for reasons.

@@ -67,6 +67,7 @@ export function createJanitorHook(client: PluginInput["client"], directory: stri
         transcript: transcript.text,
         directory,
         parentSessionID: sessionID,
+        sourceSessionID: sessionID,
         onPluginSession: (id) => {
           ownSessions.add(id)
           const s = readState()

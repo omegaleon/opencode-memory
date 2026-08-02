@@ -33,6 +33,7 @@ src/
 │   └── compaction.ts      # Single last-ditch save request if compaction fires
 ├── lib/
 │   ├── wiki.ts            # Page model: frontmatter parse/serialize, validation, TOC derivation
+│   ├── redact.ts          # Narrow credential redaction applied at the write choke point
 │   ├── distill.ts         # Child-session distillation + read-merge-rewrite of pages
 │   ├── transcript.ts      # Compact transcript rendering from session messages
 │   ├── state.ts           # Janitor cursors + bootstrap progress ({wiki}/.memory-state.json)

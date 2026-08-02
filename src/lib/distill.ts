@@ -6,6 +6,8 @@ import { listPages, readPage, writePage, pathFor, slugify, deriveTOC, MAX_BODY_L
 export interface DistillReport {
   written: string[]
   skipped: string[]
+  /** "page: label,label" for any credentials stripped at write time */
+  redacted: string[]
 }
 
 /** Per-prompt timeout — a stuck distillation must never wedge the janitor */
@@ -33,11 +35,32 @@ const DISTILL_SYSTEM =
   "root cause, fix. Narrative is fine here.\n" +
   "- Project: context for one codebase — architecture, deployment, key decisions, " +
   "current state (open PRs, blockers, next steps). Requires code_path.\n\n" +
+  "CRITICAL — DUAL EXTRACTION: an investigation almost always yields technique that " +
+  "outlives the incident. Whenever the transcript contains BOTH a specific incident " +
+  "AND generalizable technique, emit BOTH pages: the Investigation for the narrative, " +
+  "AND a Topic (new or updated) carrying the reusable technique on its own, understandable " +
+  "without the incident. Example: debugging missing Slack logs yields an Investigation " +
+  "about that outage AND Topic updates on scoping S3 queries by event time vs wall clock. " +
+  "Cross-reference them by path in the bodies. Knowledge buried in an incident write-up " +
+  "is knowledge lost.\n\n" +
   "What counts as durable: root causes, non-obvious fixes, exact API endpoints/paths, " +
   "required env vars/versions, access patterns (e.g. 'try aws --profile default first'), " +
-  "architecture decisions with rationale, deployment procedures, links to repos/docs.\n" +
+  "query/scoping techniques, architecture decisions with rationale, deployment procedures, " +
+  "links to repos/docs, verbatim error strings worth searching for.\n" +
   "What does NOT: routine edits, generic knowledge any LLM already has, blow-by-blow " +
   "narration, anything you cannot state concretely.\n\n" +
+  "Rules that keep the wiki from rotting:\n" +
+  "1. An existing page does NOT mean everything about that subject was captured — add " +
+  "what is genuinely new.\n" +
+  "2. No detail contamination: do not move specifics from one page's subject onto another.\n" +
+  "3. No meta-extraction: never write pages about the wiki, this distillation process, " +
+  "or the assistant's own behaviour.\n" +
+  "4. NEVER record credentials — passwords, API keys, tokens, private keys, connection " +
+  "strings with embedded passwords. Record the credential's NAME/location instead " +
+  "(e.g. 'token in $SLACK_BOT_TOKEN / 1Password entry X'). Non-secret identifiers " +
+  "(account IDs, ARNs, bucket names, hostnames) ARE valuable — keep those.\n" +
+  "5. If new information contradicts an existing page, prefer the newer fact and note " +
+  "the supersession briefly.\n\n" +
   `Output ONLY page blocks in exactly this format (repeat per page, max body ${MAX_BODY_LINES} lines):\n\n` +
   PAGE_BLOCK_FORMAT +
   "\n\nPrefer UPDATING an existing page (same slug as shown in the index you are given) " +
@@ -76,6 +99,8 @@ export async function distillTranscript(
     transcript: string
     directory: string
     parentSessionID?: string
+    /** Session the knowledge came from — recorded as page provenance */
+    sourceSessionID?: string
     /** Called with the child session ID so callers can exclude it from harvesting */
     onPluginSession?: (sessionID: string) => void
   }
@@ -83,6 +108,7 @@ export async function distillTranscript(
   try {
     const pages = listPages()
     const toc = deriveTOC(pages)
+    const candidates = selectCandidates(pages, opts.transcript, opts.directory)
 
     // Child session keeps distillation out of the user's context entirely.
     // parentID makes it a sub-session (not shown in the main session list).
@@ -97,14 +123,18 @@ export async function distillTranscript(
 
     const userPrompt =
       (toc ? `EXISTING WIKI INDEX (update these instead of duplicating):\n${toc}\n\n` : "") +
+      (candidates
+        ? "MOST LIKELY PAGES TO UPDATE (current full content — merge into these " +
+          `rather than creating new pages when the subject matches):\n${candidates}\n\n`
+        : "") +
       `SESSION WORKING DIRECTORY: ${opts.directory}\n\n` +
       `TRANSCRIPT:\n${opts.transcript}`
 
     const reply = await promptWithTimeout(client, child.id, DISTILL_SYSTEM, userPrompt)
     if (reply == null) return null
-    if (/NOTHING TO SAVE/.test(reply)) return { written: [], skipped: [] }
+    if (/NOTHING TO SAVE/.test(reply)) return { written: [], skipped: [], redacted: [] }
 
-    const report: DistillReport = { written: [], skipped: [] }
+    const report: DistillReport = { written: [], skipped: [], redacted: [] }
 
     for (const block of parseBlocks(reply)) {
       const relPath = resolveRelPath(block)
@@ -125,6 +155,12 @@ export async function distillTranscript(
       }
 
       try {
+        // Provenance: accumulate source sessions, newest last, bounded
+        const sources = [...(existing?.sourceSessions ?? [])]
+        if (opts.sourceSessionID && !sources.includes(opts.sourceSessionID)) {
+          sources.push(opts.sourceSessionID)
+        }
+
         const page: WikiPage = {
           relPath,
           type: final.type,
@@ -133,10 +169,14 @@ export async function distillTranscript(
           tags: final.tags,
           timestamp: new Date().toISOString(),
           codePath: final.codePath ?? existing?.codePath,
+          sourceSessions: sources.slice(-10),
           body: final.body,
         }
-        writePage(page)
+        const redacted = writePage(page)
         report.written.push(relPath)
+        if (redacted.length > 0) {
+          report.redacted.push(`${relPath}: ${redacted.join(", ")}`)
+        }
       } catch (err) {
         report.skipped.push(`${relPath}: ${err instanceof Error ? err.message : err}`)
       }
@@ -146,6 +186,66 @@ export async function distillTranscript(
   } catch {
     return null
   }
+}
+
+/** How many existing pages to show the distiller in full before it writes */
+const MAX_CANDIDATES = 4
+/** Character cap on the candidate block */
+const CANDIDATE_CHAR_CAP = 12_000
+
+/**
+ * Pick the existing pages most likely to be the right merge targets and render
+ * them in full for the distillation prompt. The TOC alone tells the model a
+ * page EXISTS; showing the actual content is what makes it merge instead of
+ * writing a near-duplicate (mem0's "context lookup" stage — the proactive
+ * version of the code_path identity fix).
+ *
+ * Scoring is deliberately cheap: token overlap between the transcript and each
+ * page's title/description/tags, plus a strong bonus for the project page that
+ * owns the session's working directory.
+ */
+function selectCandidates(pages: WikiPage[], transcript: string, directory: string): string {
+  if (pages.length === 0) return ""
+
+  // Sample the transcript — matching against the whole thing is needless work
+  const haystack = transcript.slice(0, 20_000).toLowerCase()
+  const scored = pages.map((page) => {
+    const terms = [
+      ...page.title.toLowerCase().split(/[^a-z0-9]+/),
+      ...page.description.toLowerCase().split(/[^a-z0-9]+/),
+      ...page.tags,
+    ].filter((t) => t.length > 3)
+
+    let score = 0
+    for (const term of new Set(terms)) {
+      if (haystack.includes(term)) score++
+    }
+    // The project page owning this directory is almost always a merge target
+    if (page.type === "Project" && page.codePath && directory.startsWith(page.codePath)) {
+      score += 10
+    }
+    return { page, score }
+  })
+
+  const top = scored
+    .filter((s) => s.score > 0)
+    .sort((a, b) => b.score - a.score)
+    .slice(0, MAX_CANDIDATES)
+
+  let out = ""
+  for (const { page } of top) {
+    const rendered = pageToBlockText(page, page.type, tocSlugOf(page)) + "\n\n"
+    if (out.length + rendered.length > CANDIDATE_CHAR_CAP) break
+    out += rendered
+  }
+  return out.trim()
+}
+
+/** Slug portion of a page path (mirrors the TOC's naming) */
+function tocSlugOf(page: WikiPage): string {
+  if (page.type === "Project") return page.relPath.split("/")[1] ?? page.relPath
+  const file = page.relPath.split("/").pop() ?? page.relPath
+  return file.replace(/\.md$/, "")
 }
 
 /**

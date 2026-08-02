@@ -1,6 +1,7 @@
 import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs"
 import { dirname, join } from "node:path"
 import { homedir } from "node:os"
+import { redactSecrets } from "./redact.js"
 
 /** Allowed page types (OKF-compatible subset) */
 export type PageType = "Project" | "Topic" | "Investigation"
@@ -16,6 +17,8 @@ export interface WikiPage {
   timestamp: string
   /** Project pages only: absolute path of the code directory this page documents */
   codePath?: string
+  /** Session IDs this page's knowledge came from (provenance, not retellings) */
+  sourceSessions?: string[]
   /** Markdown body (everything after the frontmatter) */
   body: string
 }
@@ -103,6 +106,7 @@ export function readPage(relPath: string): WikiPage | null {
       tags: parseTags(fields["tags"]),
       timestamp: fields["timestamp"] ?? "",
       codePath: fields["code_path"],
+      sourceSessions: parseTags(fields["source_sessions"]),
       body: body.trim(),
     }
   } catch {
@@ -135,6 +139,9 @@ export function serializePage(page: WikiPage): string {
   out += `tags: [${page.tags.join(", ")}]\n`
   out += `timestamp: ${page.timestamp || new Date().toISOString()}\n`
   if (page.codePath) out += `code_path: ${page.codePath}\n`
+  if (page.sourceSessions && page.sourceSessions.length > 0) {
+    out += `source_sessions: [${page.sourceSessions.join(", ")}]\n`
+  }
   out += "---\n\n"
   out += page.body.trim() + "\n"
   return out
@@ -142,16 +149,25 @@ export function serializePage(page: WikiPage): string {
 
 /**
  * Write a page (full replacement — read-merge-rewrite is the caller's job).
- * Returns the relative path written, or throws with a validation error.
+ * Credentials are stripped here: this is the single write choke point, so
+ * nothing reaches disk unscanned. Returns the labels of anything redacted
+ * (empty when clean) so the caller can surface it — redaction is never silent.
+ * Throws on validation failure.
  */
-export function writePage(page: WikiPage): string {
-  const error = validatePage(page)
+export function writePage(page: WikiPage): string[] {
+  const bodyScan = redactSecrets(page.body)
+  const descScan = redactSecrets(page.description)
+  const clean: WikiPage = { ...page, body: bodyScan.text, description: descScan.text }
+  const redacted = [...new Set([...bodyScan.found, ...descScan.found])]
+
+  const error = validatePage(clean)
   if (error) throw new Error(`Invalid page ${page.relPath}: ${error}`)
 
-  const filePath = join(getWikiDir(), page.relPath)
+  const filePath = join(getWikiDir(), clean.relPath)
   ensureDir(dirname(filePath))
-  writeFileSync(filePath, serializePage(page), "utf-8")
-  return page.relPath
+  writeFileSync(filePath, serializePage(clean), "utf-8")
+  invalidatePageCache()
+  return redacted
 }
 
 /** Compute the canonical relative path for a page by type */
@@ -162,11 +178,25 @@ export function pathFor(type: PageType, slug: string, date?: string): string {
   return join("investigations", `${prefix}-${slug}.md`)
 }
 
+/** Cached page list — invalidated on every write so same-run visibility of
+ * freshly written pages is preserved (distillation depends on it). */
+let pageCache: { pages: WikiPage[]; at: number } | null = null
+const PAGE_CACHE_TTL_MS = 5_000
+
+export function invalidatePageCache(): void {
+  pageCache = null
+}
+
 /**
  * List all pages in the wiki (projects, topics, investigations).
  * Reads every page's frontmatter; bodies are included (files are capped small).
+ * Result is briefly cached; any write invalidates the cache immediately.
  */
 export function listPages(): WikiPage[] {
+  if (pageCache && Date.now() - pageCache.at < PAGE_CACHE_TTL_MS) {
+    return pageCache.pages
+  }
+
   const wikiDir = getWikiDir()
   const pages: WikiPage[] = []
 
@@ -191,6 +221,7 @@ export function listPages(): WikiPage[] {
     } catch {}
   }
 
+  pageCache = { pages, at: Date.now() }
   return pages
 }
 
@@ -210,8 +241,12 @@ export function findProjectPage(directory: string, pages?: WikiPage[]): WikiPage
  * Derive the TOC from page frontmatter. Never maintained as a file — always
  * generated from what is actually on disk, so it cannot drift.
  * Compact format: section headers carry the path template once, entries are
- * bare slugs — saves the repeated "topics/.../overview.md" per line.
- * Topics and projects are listed individually; investigations as a count.
+ * bare slugs.
+ *
+ * ALL page types are listed, investigations included: an investigation
+ * frequently carries reusable technique, and listing only a count made that
+ * knowledge undiscoverable unless a keyword search happened to hit it.
+ * Discoverability beats token thrift.
  */
 export function deriveTOC(pages?: WikiPage[]): string {
   const all = pages ?? listPages()
@@ -220,39 +255,47 @@ export function deriveTOC(pages?: WikiPage[]): string {
   const bySlug = (a: WikiPage, b: WikiPage) => a.relPath.localeCompare(b.relPath)
   const topics = all.filter((p) => p.type === "Topic").sort(bySlug)
   const projects = all.filter((p) => p.type === "Project").sort(bySlug)
-  const investigations = all.filter((p) => p.type === "Investigation")
+  // Newest investigations first — recent troubleshooting is likelier relevant
+  const investigations = all.filter((p) => p.type === "Investigation").sort((a, b) => b.relPath.localeCompare(a.relPath))
 
-  const lines: string[] = []
-  if (topics.length > 0) {
-    lines.push(`TOPICS — load with memory_recall page="topics/<slug>.md":`)
-    for (const p of topics) {
-      lines.push(`- ${tocSlug(p)}: ${p.description}`)
-    }
-  }
-  if (projects.length > 0) {
-    lines.push(`PROJECTS — load with memory_recall page="projects/<slug>/overview.md":`)
-    for (const p of projects) {
-      lines.push(`- ${tocSlug(p)}: ${p.description}`)
-    }
-  }
+  const sections: Array<{ header: string; pages: WikiPage[] }> = [
+    { header: `TOPICS — load with memory_recall page="topics/<slug>.md":`, pages: topics },
+    { header: `PROJECTS — load with memory_recall page="projects/<slug>/overview.md":`, pages: projects },
+    { header: `INVESTIGATIONS — load with memory_recall page="investigations/<name>.md":`, pages: investigations },
+  ]
 
-  // Enforce the character budget; overflow becomes a pointer, not content
+  // Budget is enforced per section so no single type can crowd out the others
   let out = ""
   let truncated = 0
-  for (const line of lines) {
-    if (out.length + line.length + 1 > TOC_CHAR_BUDGET) {
-      truncated++
-      continue
+  for (const section of sections) {
+    if (section.pages.length === 0) continue
+    const share = Math.floor(TOC_CHAR_BUDGET / sections.filter((s) => s.pages.length > 0).length)
+    let used = 0
+    let sectionOut = section.header + "\n"
+    for (const p of section.pages) {
+      const line = `- ${tocSlug(p)}: ${p.description}\n`
+      if (used + line.length > share) {
+        truncated++
+        continue
+      }
+      sectionOut += line
+      used += line.length
     }
-    out += line + "\n"
+    out += sectionOut
   }
   if (truncated > 0) {
-    out += `(+${truncated} more pages — memory_recall with no args to list all)\n`
-  }
-  if (investigations.length > 0) {
-    out += `(${investigations.length} investigation notes — memory_recall query="..." to search)\n`
+    out +=
+      `(+${truncated} more pages not shown — TOC budget reached. ` +
+      `memory_recall with no args lists everything; memory_status reports index health)\n`
   }
   return out.trimEnd()
+}
+
+/** Number of pages omitted from the derived TOC (0 when everything fits) */
+export function tocTruncationCount(pages?: WikiPage[]): number {
+  const all = pages ?? listPages()
+  const shown = deriveTOC(all).split("\n").filter((l) => l.startsWith("- ")).length
+  return Math.max(0, all.length - shown)
 }
 
 /** Extract the bare slug used in TOC lines from a page's relPath */

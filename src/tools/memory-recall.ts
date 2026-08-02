@@ -22,6 +22,14 @@ export function createMemoryRecallTool() {
         .string()
         .optional()
         .describe("Keywords to search across all pages (titles, descriptions, tags, bodies)."),
+      type: tool.schema
+        .enum(["Topic", "Project", "Investigation"])
+        .optional()
+        .describe("Restrict results to one page type."),
+      tag: tool.schema
+        .string()
+        .optional()
+        .describe("Restrict results to pages carrying this tag."),
     },
     async execute(args) {
       // Load one page in full
@@ -33,9 +41,24 @@ export function createMemoryRecallTool() {
         return truncate(serializePage(page))
       }
 
-      const pages = listPages()
+      let pages = listPages()
       if (pages.length === 0) {
         return "The wiki is empty. Pages are created by the background janitor, memory_write, or memory_bootstrap."
+      }
+
+      // Optional filters narrow the candidate set before searching/listing
+      const filters: string[] = []
+      if (args.type) {
+        pages = pages.filter((p) => p.type === args.type)
+        filters.push(`type=${args.type}`)
+      }
+      if (args.tag) {
+        const tag = args.tag.trim().toLowerCase()
+        pages = pages.filter((p) => p.tags.includes(tag))
+        filters.push(`tag=${tag}`)
+      }
+      if (pages.length === 0) {
+        return `No pages match filter(s): ${filters.join(", ")}`
       }
 
       // Keyword search

@@ -208,6 +208,7 @@ async function runLoop(
           transcript: transcript.text,
           directory: session.directory,
           parentSessionID,
+          sourceSessionID: session.id,
           onPluginSession: (id) => {
             const s = readState()
             s.pluginSessions.push(id)
@@ -229,6 +230,7 @@ async function runLoop(
         const detail = [
           report.written.length > 0 ? `wrote ${report.written.join(", ")}` : "nothing durable",
           ...report.skipped.map((s) => `rejected ${s}`),
+          ...report.redacted.map((r) => `REDACTED ${r}`),
         ].join("; ")
         pushRecent(`- ${label}: ${detail}`)
 
