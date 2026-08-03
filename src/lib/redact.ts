@@ -16,6 +16,15 @@ export interface RedactionResult {
  *
  * Every hit is reported to the caller so a redaction is visible, never silent.
  */
+/**
+ * Accessors that mean "this value lives elsewhere" — the line documents the
+ * SOURCE of a credential, not the credential. Requiring a trailing `.`, `[`
+ * or `(` keeps it precise: a literal password is never `var.` + identifier.
+ */
+const CODE_REF =
+  "(?:var|local|data|module|self|this|env|config|settings|params|opts|options|" +
+  "process|os|System|ENV|Deno|secrets|inputs|vault|state)[.\\[(]"
+
 const PATTERNS: Array<{ label: string; regex: RegExp; replace?: (match: string, ...groups: string[]) => string }> = [
   // Private key blocks (any type: RSA, OPENSSH, EC, PGP...)
   {
@@ -44,17 +53,32 @@ const PATTERNS: Array<{ label: string; regex: RegExp; replace?: (match: string, 
     replace: (_m, prefix, scheme) => `${prefix}${scheme} [REDACTED:bearer-token]`,
   },
   // Credentials embedded in URLs: scheme://user:secret@host
+  // Placeholders are exempt — CI config is full of ${CI_JOB_TOKEN}@host, and
+  // the variable NAME is documentation, not a secret.
   {
     label: "url-password",
-    regex: /\b([a-z][a-z0-9+.-]*:\/\/[^\s:/@]+):[^\s@/]{3,}@/gi,
+    regex: /\b([a-z][a-z0-9+.-]*:\/\/[^\s:/@]+):(?![$<*])(?!REDACTED)[^\s@/]{3,}@/gi,
     replace: (_m, userPart) => `${userPart}:[REDACTED:url-password]@`,
   },
-  // Explicit password/secret/token assignments with a literal value.
-  // Placeholders (<...>, ${...}, $VAR, ***, REDACTED, xxx) are left alone.
+  // Explicit password/secret/token assignments with a LITERAL value.
+  //
+  // Three exemptions, all of which are identifiers rather than credentials:
+  //  - (?<![:/]) — a keyword preceded by ':' or '/' belongs to a URI, ARN or
+  //    path, never an assignment. Without this, the trailing segment of
+  //    arn:aws:secretsmanager:...:secret:dev/app/db-AbCdEf gets destroyed,
+  //    taking the secret's NAME (what a reader actually needs) with it.
+  //  - CODE_REF — `password = var.db_password`, `api_key = os.environ[...]`
+  //    documents where a credential comes from; redacting it removes the only
+  //    useful information on the line.
+  //  - placeholders: <...>, ${...}, $VAR, ***, xxx, REDACTED
   {
     label: "assigned-secret",
-    regex:
-      /\b(password|passwd|secret|api_key|apikey|access_token|auth_token|client_secret)(\s*[=:]\s*)["']?((?!\s)(?![<$*])(?!x{3,})(?!REDACTED)[^\s"',;]{6,})["']?/gi,
+    regex: new RegExp(
+      `(?<![:/])\\b(password|passwd|secret|api_key|apikey|access_token|auth_token|client_secret)` +
+        `(\\s*[=:]\\s*)["']?` +
+        `((?!\\s)(?![<$*])(?!x{3,})(?!REDACTED)(?!${CODE_REF})[^\\s"',;]{6,})["']?`,
+      "gi"
+    ),
     replace: (_m, name, sep) => `${name}${sep}[REDACTED:${name.toLowerCase()}]`,
   },
 ]

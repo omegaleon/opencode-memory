@@ -12,6 +12,7 @@ import {
 import { readState } from "../lib/state.js"
 import { openDb, listHistorySessions } from "../lib/db.js"
 import { isJobRunning, activeJobKind } from "../lib/job-runner.js"
+import { isGitRepo, getLastGitError } from "../lib/git.js"
 
 export function createMemoryStatusTool() {
   return tool({
@@ -136,6 +137,15 @@ export function createMemoryStatusTool() {
             ? `; ${demoted} consolidated investigation(s) excluded — their technique is in topics, originals still searchable.`
             : ".")
       )
+      // Version control — the recovery path when a write goes wrong
+      const gitError = getLastGitError()
+      lines.push(
+        isGitRepo()
+          ? `Version control: wiki is a git repo (every write is committed).${gitError ? ` WARNING: ${gitError}` : ""}`
+          : `Version control: NOT a git repo — page writes are unrecoverable if a merge goes wrong. ` +
+            `Run 'git init' in the wiki dir (or unset OPENCODE_WIKI_GIT=0).${gitError ? ` Last git error: ${gitError}` : ""}`
+      )
+
       if (omitted > 0) {
         lines.push(
           `WARNING: ${omitted} page(s) omitted — they exist but the model never sees them in ` +

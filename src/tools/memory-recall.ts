@@ -1,5 +1,5 @@
 import { tool } from "@opencode-ai/plugin/tool"
-import { listPages, readPage, serializePage } from "../lib/wiki.js"
+import { listPages, readPage, serializePage, pageRevision } from "../lib/wiki.js"
 
 /** Cap tool output — recall must never become a context bomb */
 const OUTPUT_CHAR_CAP = 20_000
@@ -34,11 +34,15 @@ export function createMemoryRecallTool() {
     async execute(args) {
       // Load one page in full
       if (args.page) {
-        const page = readPage(args.page.trim())
+        const relPath = args.page.trim()
+        const page = readPage(relPath)
         if (!page) {
           return `No page found at: ${args.page}\nCall memory_recall with no args to list available pages.`
         }
-        return truncate(serializePage(page))
+        return truncate(
+          `revision: ${pageRevision(relPath)}  (pass as expect_revision if you update this page)\n\n` +
+            serializePage(page)
+        )
       }
 
       let pages = listPages()

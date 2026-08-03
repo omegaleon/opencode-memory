@@ -1,5 +1,5 @@
 import type { Hooks, PluginInput } from "@opencode-ai/plugin"
-import { listPages, deriveTOC, findProjectPage, tocBudgetFor, setLastUsedBudget } from "../lib/wiki.js"
+import { listPages, deriveTOC, findProjectPage, tocBudgetFor, setLastUsedBudget, tocTruncationCount } from "../lib/wiki.js"
 import { readState } from "../lib/state.js"
 
 /** Cap on the injected project overview (chars) — overviews are size-capped
@@ -49,6 +49,16 @@ export function createInjectHook(directory: string): Hooks["experimental.chat.sy
           toc +=
             `\n(${demoted.length} older investigation(s) not listed — their reusable technique ` +
             `is in the topics above; search the originals with memory_recall query="...")`
+        }
+        // The index may not list everything. Tell the model explicitly, or it
+        // will treat the list as exhaustive and conclude knowledge is absent
+        // when it is merely unlisted.
+        const omitted = tocTruncationCount(indexPages, budget)
+        if (toc && omitted > 0) {
+          toc +=
+            `\nIMPORTANT: this index is INCOMPLETE — ${omitted} page(s) exist that are not listed ` +
+            `above. Never conclude the wiki lacks something based on this list alone; ` +
+            `run memory_recall query="<keywords>" to search the full wiki.`
         }
         const project = findProjectPage(directory, pages)
         let overview = ""

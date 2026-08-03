@@ -74,6 +74,15 @@ export function startConsolidate(
       return { outcome: "failed", detail: "FAILED (will retry on next run)" }
     }
 
+    // Pages were produced but all rejected — do not mark consolidated, so the
+    // investigation is retried rather than silently losing its technique.
+    if (report.written.length === 0 && report.skipped.length > 0) {
+      return {
+        outcome: "failed",
+        detail: `ALL PAGES REJECTED (will retry): ${report.skipped.join("; ")}`,
+      }
+    }
+
     // Guard: consolidation must never rewrite the investigation itself
     const topics = report.written.filter((p) => p !== investigation.relPath)
 
@@ -90,7 +99,8 @@ export function startConsolidate(
       pages: topics.length,
       detail:
         (topics.length > 0 ? `promoted to ${topics.join(", ")}` : "no generalizable technique") +
-        (report.redacted.length > 0 ? ` [REDACTED: ${report.redacted.join("; ")}]` : ""),
+        (report.skipped.length > 0 ? ` [REJECTED: ${report.skipped.join("; ")}]` : "") +
+        (report.redacted.length > 0 ? ` [redacted: ${report.redacted.join("; ")}]` : ""),
     }
   }
 

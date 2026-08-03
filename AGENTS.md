@@ -13,14 +13,26 @@ Small TypeScript project built as an ESM plugin for the `@opencode-ai/plugin` SD
 No external runtime dependencies beyond the SDK (bootstrap uses `bun:sqlite`, which
 ships with the Bun runtime OpenCode plugins execute in).
 
-## Build & Typecheck
+## Build & Test
 
 ```bash
 npm run build        # Compile TypeScript to dist/ (runs tsc)
 npm run typecheck    # Type-check without emitting (tsc --noEmit)
+npm test             # Regression suite — run AFTER a build (tests import dist/)
 ```
 
-There is no linter, formatter, CI pipeline, or test suite configured.
+There is no linter, formatter, or CI pipeline.
+
+**CRITICAL — testing rule**: every defect found in the wild MUST get a fixture in
+`test/run.mjs`, copied *verbatim* from the report. Four silent data-loss bugs
+survived internal testing because the fixtures were authored by the same mental
+model that wrote the code (e.g. the redaction test used an IAM ARN — no `secret:`
+keyword — so the Secrets Manager ARN case was never exercised). Do not paraphrase
+external fixtures into something you find plausible.
+
+Also verify a fix by running the suite against the previous commit
+(`git worktree add /tmp/old <sha>`, build, copy `test/`, run) — a test that never
+failed proves nothing.
 
 ## Project Structure
 

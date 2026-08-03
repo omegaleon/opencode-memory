@@ -218,12 +218,15 @@ and prune to reclaim space.
 ## Configuration
 
 - `OPENCODE_WIKI_DIR` — wiki location (default `~/wiki`).
+- `OPENCODE_WIKI_GIT` — set to `0` to disable automatic git init/commit of the wiki.
 - `OPENCODE_WIKI_TOC_SHARE` — share of the model's context window the index may
   use (default `0.1` = 10%; max `0.5`).
 - `OPENCODE_WIKI_TOC_BUDGET` — pin the index to a fixed char count, disabling
   context-based scaling. Only needed to override the default behaviour.
-- **Git (optional)** — if the wiki dir is a git repo, every write is committed
-  (`git init ~/wiki` to enable; skip it and nothing changes).
+- **Git (automatic, recommended)** — the wiki is initialised as a git repo on
+  first write and every write is committed. Page writes are LLM-generated
+  merges into a source of truth, so history is the recovery path when one goes
+  wrong. Disable with `OPENCODE_WIKI_GIT=0`. Nothing is ever pushed anywhere.
 - **Obsidian (optional)** — open the wiki dir as a vault to browse/search/graph it.
   The plugin neither knows nor cares.
 
@@ -250,11 +253,89 @@ which is how sessions in that directory get the overview injected automatically.
 ```bash
 npm run typecheck    # Type-check without emitting
 npm run build        # Build to dist/
+npm test             # Regression suite (requires a build first)
 ```
+
+The suite in `test/run.mjs` is deliberately fixture-driven, and the fixtures
+for reported defects are copied verbatim from the reports rather than
+re-authored — the original bugs survived internal testing precisely because the
+fixtures were written by the same mental model that wrote the code. Add a
+fixture for every defect found in the wild.
 
 ## Changelog
 
 Newest first, stamped in UTC. See `git log` for full detail.
+
+### 2026-08-03T21:46Z — silent data loss fixes + regression suite
+
+From an external defect report (fresh install, 85 sessions bootstrapped, 21
+documents / ~10,400 lines imported, 30 investigations consolidated, 304 pages).
+Every defect below was **silent**: the tool reported success, `failed: 0`, and
+content was simply gone. Measured page-loss rate before the fixes: 5 of the
+first 13 sessions (38%) lost at least one page.
+
+Reported defects, all fixed:
+
+- **Over-long description discarded the whole page**, and the session was still
+  marked done, so it was never retried. A 150-line body of real engineering
+  knowledge was thrown away because its one-line summary ran 30 chars long.
+  Descriptions are now truncated on a word boundary and the truncation is
+  reported; only empty descriptions, missing `code_path`, and over-cap bodies
+  still hard-reject.
+- **Investigation date prefixes compounded** (`2026-08-03-2026-08-03-2026-05-04-…`)
+  and investigations could never merge, because the computed path always used
+  today's date and so never matched a page written earlier. Leading dates are
+  now stripped (repeatedly), the incident's own date is preferred over the
+  harvest date, and merges match on the date-stripped slug.
+- **Body-cap rejections had no retry** and were misreported as "nothing
+  durable". Most acute on merges, which routinely exceed the cap: 2 of 5
+  chunks of one import wrote nothing while the run reported `0 failed`. The
+  distiller is now re-prompted with the actual validation error and asked to
+  split overflow onto follow-up pages rather than dropping content.
+- **Redaction destroyed identifiers rather than secrets** — Secrets Manager
+  ARNs (22 across 5 documents), code references naming where a credential
+  lives (`password = var.db_password`, `api_key = os.environ[...]`), and
+  `${VAR}` placeholders inside URLs. All three are now exempt: a keyword
+  preceded by `:` or `/` belongs to a URI/ARN/path, code accessors are
+  recognised, and the URL pattern honours the same placeholder exemption the
+  assignment pattern already had.
+- **Cross-cutting**: an item whose pages were all rejected is no longer marked
+  done — it is reported as failed and retried. Rejections are surfaced as
+  `REJECTED` in job output instead of being swallowed into a silent array.
+  The janitor no longer advances its cursor when every page was rejected.
+
+Additional hardening found while auditing for the same class of bug:
+
+- **Path traversal**: `memory_recall(page: "../../../etc/passwd")` resolved
+  outside the wiki. All page paths are now resolved against the wiki root and
+  refused if they escape.
+- **Unparseable frontmatter made pages vanish**: a newline or quote in a title
+  or description produced a file that failed to parse, so the page silently
+  disappeared from the index, search and dedup while looking fine on disk.
+  Frontmatter scalars are now flattened, and every write is read back —
+  a page that cannot be parsed fails loudly instead.
+- **Non-atomic state writes**: a crash mid-write corrupted
+  `.memory-state.json`, which resets progress and re-bootstraps everything.
+  Writes now go through a temp file plus atomic rename, and merge against the
+  on-disk copy so concurrent jobs cannot drop each other's records.
+- **Concurrent writes could silently lose content**: the janitor can write a
+  page between a model's recall and its write. `memory_recall` now returns a
+  `revision`, and `memory_write` accepts `expect_revision` and rejects a
+  merge built on a stale read.
+- **Git is now initialised automatically** in the wiki dir (disable with
+  `OPENCODE_WIKI_GIT=0`), and git errors are reported by `memory_status`
+  instead of being swallowed. Given every page is an LLM write into a source
+  of truth, history is the recovery path, not a nicety.
+- **Body cap now bounds characters as well as lines** — 150 lines of pasted
+  log could still be megabytes.
+- **The injected index states when it is incomplete**, so the model cannot
+  conclude knowledge is absent when it is merely unlisted.
+
+- **Added `npm test`** — 65 assertions covering all of the above. Fixtures for
+  the reported defects are taken verbatim from the report rather than
+  re-authored, which is precisely why the originals were missed: internal
+  fixtures were written by the same mental model that wrote the patterns. The
+  suite fails 27 assertions against the previous commit.
 
 ### 2026-08-03T20:53Z — index budget scales with the model's context window
 

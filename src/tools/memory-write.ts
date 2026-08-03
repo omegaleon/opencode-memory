@@ -1,6 +1,6 @@
 import { tool } from "@opencode-ai/plugin/tool"
 import type { WikiPage, PageType } from "../lib/wiki.js"
-import { readPage, writePage, pathFor, slugify, MAX_BODY_LINES } from "../lib/wiki.js"
+import { readPage, writePage, pathFor, slugify, pageRevision, MAX_BODY_LINES } from "../lib/wiki.js"
 import { maybeCommit } from "../lib/git.js"
 
 export function createMemoryWriteTool() {
@@ -36,12 +36,36 @@ export function createMemoryWriteTool() {
         .string()
         .optional()
         .describe("Project pages only: absolute path of the code directory this page documents."),
+      expect_revision: tool.schema
+        .string()
+        .optional()
+        .describe(
+          "Revision string from the memory_recall output you merged against. " +
+            "Pass it whenever you are UPDATING an existing page: the write is rejected if the " +
+            "page changed in the meantime (the background janitor writes pages too), so your " +
+            "merge cannot silently discard someone else's content."
+        ),
     },
     async execute(args) {
       const type = args.type as PageType
       const slug = slugify(args.slug)
       const relPath = pathFor(type, slug)
       const existing = readPage(relPath)
+
+      // Compare-and-swap: reject a merge built on a stale read rather than
+      // overwriting whatever changed underneath it.
+      if (args.expect_revision && existing) {
+        const current = pageRevision(relPath)
+        if (current !== args.expect_revision) {
+          return (
+            `REJECTED (page changed since you read it — revision ${args.expect_revision} → ${current}).\n` +
+            `Something else (most likely the background janitor) wrote this page while you were ` +
+            `merging. Call memory_recall page="${relPath}" again, merge your changes into the ` +
+            `CURRENT content, and retry with the new revision. Do not resubmit the old merge — ` +
+            `it would discard their work.`
+          )
+        }
+      }
 
       const page: WikiPage = {
         relPath,

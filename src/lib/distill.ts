@@ -1,7 +1,16 @@
 import { basename } from "node:path"
 import type { PluginInput } from "@opencode-ai/plugin"
 import type { WikiPage, PageType } from "./wiki.js"
-import { listPages, readPage, writePage, pathFor, slugify, deriveTOC, MAX_BODY_LINES } from "./wiki.js"
+import {
+  listPages,
+  readPage,
+  writePage,
+  pathFor,
+  slugify,
+  deriveTOC,
+  findInvestigationBySlug,
+  MAX_BODY_LINES,
+} from "./wiki.js"
 
 export interface DistillReport {
   written: string[]
@@ -12,6 +21,9 @@ export interface DistillReport {
 
 /** Per-prompt timeout — a stuck distillation must never wedge the janitor */
 const PROMPT_TIMEOUT_MS = 5 * 60_000
+
+/** Re-prompt attempts when a page fails validation (body cap, mostly) */
+const WRITE_RETRIES = 2
 
 const PAGE_BLOCK_FORMAT =
   "## PAGE: <type>\n" +
@@ -154,31 +166,79 @@ export async function distillTranscript(
         if (merged) final = { ...merged, type: block.type, slug: block.slug }
       }
 
-      try {
-        // Provenance: accumulate source sessions, newest last, bounded
-        const sources = [...(existing?.sourceSessions ?? [])]
-        if (opts.sourceSessionID && !sources.includes(opts.sourceSessionID)) {
-          sources.push(opts.sourceSessionID)
-        }
+      // Provenance: accumulate source sessions, newest last, bounded
+      const sources = [...(existing?.sourceSessions ?? [])]
+      if (opts.sourceSessionID && !sources.includes(opts.sourceSessionID)) {
+        sources.push(opts.sourceSessionID)
+      }
 
-        const page: WikiPage = {
-          relPath,
-          type: final.type,
-          title: final.title,
-          description: final.description,
-          tags: final.tags,
-          timestamp: new Date().toISOString(),
-          codePath: final.codePath ?? existing?.codePath,
-          sourceSessions: sources.slice(-10),
-          body: final.body,
+      const toPage = (b: ParsedBlock, path: string): WikiPage => ({
+        relPath: path,
+        type: b.type,
+        title: b.title,
+        description: b.description,
+        tags: b.tags,
+        timestamp: new Date().toISOString(),
+        codePath: b.codePath ?? existing?.codePath,
+        sourceSessions: sources.slice(-10),
+        body: b.body,
+      })
+
+      // Write with retry: a validation rejection (almost always the body cap
+      // on a merge) used to silently discard the page. Feed the actual error
+      // back to the child session — which still holds the content — and ask
+      // for a corrected version, splitting overflow onto follow-up pages
+      // rather than deleting it.
+      let candidate: ParsedBlock | undefined = final
+      let candidatePath = relPath
+      let lastError = ""
+
+      for (let attempt = 0; attempt <= WRITE_RETRIES; attempt++) {
+        if (!candidate) break
+        try {
+          const redacted = writePage(toPage(candidate, candidatePath))
+          report.written.push(candidatePath)
+          if (redacted.length > 0) {
+            report.redacted.push(`${candidatePath}: ${redacted.join(", ")}`)
+          }
+          lastError = ""
+          break
+        } catch (err) {
+          lastError = err instanceof Error ? err.message : String(err)
+          if (attempt === WRITE_RETRIES) break
+
+          const fixReply = await promptWithTimeout(
+            client,
+            child.id,
+            DISTILL_SYSTEM,
+            `The page you produced was REJECTED: ${lastError}\n\n` +
+              `Output the SAME page again as a page block, corrected. Do NOT abandon ` +
+              `content: move whatever does not fit onto a separate follow-up page (its own ` +
+              `page block with a distinct slug) instead of deleting it, and keep every ` +
+              `concrete identifier, command, path and version string.`
+          )
+          const fixed = fixReply ? parseBlocks(fixReply) : []
+          if (fixed.length === 0) break
+
+          candidate = { ...fixed[0]!, type: candidate.type }
+          candidatePath = resolveRelPath(candidate)
+
+          // Any additional blocks are overflow pages — write them too
+          for (const overflow of fixed.slice(1)) {
+            const overflowPath = resolveRelPath(overflow)
+            try {
+              const r = writePage(toPage(overflow, overflowPath))
+              report.written.push(overflowPath)
+              if (r.length > 0) report.redacted.push(`${overflowPath}: ${r.join(", ")}`)
+            } catch (e) {
+              report.skipped.push(`${overflowPath}: ${e instanceof Error ? e.message : e}`)
+            }
+          }
         }
-        const redacted = writePage(page)
-        report.written.push(relPath)
-        if (redacted.length > 0) {
-          report.redacted.push(`${relPath}: ${redacted.join(", ")}`)
-        }
-      } catch (err) {
-        report.skipped.push(`${relPath}: ${err instanceof Error ? err.message : err}`)
+      }
+
+      if (lastError) {
+        report.skipped.push(`${candidatePath}: ${lastError}`)
       }
     }
 
@@ -267,6 +327,13 @@ function resolveRelPath(block: ParsedBlock): string {
     )
     if (match) return match.relPath
     return pathFor("Project", slugify(basename(codePath)))
+  }
+  // Investigations are date-prefixed, so a same-subject page written on an
+  // earlier day would never be found by path. Match on the date-stripped slug
+  // so investigations can merge instead of duplicating on every run.
+  if (block.type === "Investigation") {
+    const match = findInvestigationBySlug(block.slug)
+    if (match) return match.relPath
   }
   return pathFor(block.type, block.slug)
 }

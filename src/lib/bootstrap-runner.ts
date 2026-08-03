@@ -75,17 +75,27 @@ export async function startBootstrap(
       return { outcome: "failed", detail: "FAILED (will retry on next run)" }
     }
 
+    // Content was produced but every page was rejected: do NOT mark the
+    // session done, or the knowledge is stranded forever. Report it as a
+    // failure so it is visible and retried, never as "nothing durable".
+    if (report.written.length === 0 && report.skipped.length > 0) {
+      return {
+        outcome: "failed",
+        detail: `ALL PAGES REJECTED (will retry): ${report.skipped.join("; ")}`,
+      }
+    }
+
     markBootstrapped(session.id)
     if (report.written.length > 0) {
       maybeCommit(`memory: bootstrap ${session.id.slice(0, 12)} (${report.written.length} page write(s))`)
     }
     return {
-      outcome: "written",
+      outcome: report.written.length > 0 ? "written" : "skipped",
       pages: report.written.length,
       detail: [
         report.written.length > 0 ? `wrote ${report.written.join(", ")}` : "nothing durable",
-        ...report.skipped.map((s) => `rejected ${s}`),
-        ...report.redacted.map((r) => `REDACTED ${r}`),
+        ...report.skipped.map((s) => `REJECTED ${s}`),
+        ...report.redacted.map((r) => `redacted ${r}`),
       ].join("; "),
     }
   }

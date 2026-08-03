@@ -76,8 +76,11 @@ export function createJanitorHook(client: PluginInput["client"], directory: stri
         },
       })
 
-      // Advance the cursor even when nothing was written — the delta was seen
-      if (report) {
+      // Do NOT advance the cursor if every page was rejected — the delta
+      // still holds uncaptured knowledge and must be retried next harvest.
+      const allRejected = report != null && report.written.length === 0 && report.skipped.length > 0
+
+      if (report && !allRejected) {
         const s = readState()
         s.cursors[sessionID] = {
           lastMessageID: transcript.lastMessageID ?? cursor.lastMessageID,
