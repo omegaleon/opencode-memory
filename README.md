@@ -177,10 +177,22 @@ optional; the plugin works identically without them.
 ## Index sizing and growth
 
 The injected index carries one line per page (`slug: description`), averaging
-~160 chars / ~40 tokens. The budget is **60,000 chars (~15K tokens, ~350
-pages)** — a few percent of a modern context window, spent on the one thing
-that makes the wiki work: a page missing from the index is a page the model
-never learns exists.
+~160 chars / ~50 tokens. The budget is **10% of the model's context window**,
+scaled per session — a page missing from the index is a page the model never
+learns exists, so this is sized for discoverability rather than token thrift.
+
+```
+| Model context | Index budget    | ≈ tokens | ≈ pages |
+|---------------|-----------------|----------|---------|
+| 32K           | 10,400 chars    | 3,200    | 65      |
+| 128K          | 41,600 chars    | 12,800   | 260     |
+| 200K          | 65,000 chars    | 20,000   | 400     |
+| 1M            | 325,000 chars   | 100,000  | 2,000   |
+```
+
+Budgets are tracked in characters (~3.25 chars/token for hyphenated technical
+slugs, which tokenize denser than prose). When the model's context window is
+unknown, a 60,000-char fallback applies.
 
 Growth is bounded by **distinct subjects, not session count**:
 
@@ -198,15 +210,18 @@ Growth is bounded by **distinct subjects, not session count**:
   sharing a `code_path` or differing only by a generic slug affix;
   `memory_prune` removes the leftover after you approve a merge.
 
-If the index ever exceeds budget, `memory_status` says so explicitly (pages
-are never dropped silently). Raise it with `OPENCODE_WIKI_TOC_BUDGET`, or
-consolidate and prune to reclaim space.
+If the index ever exceeds budget, `memory_status` says so explicitly (pages are
+never dropped silently) and reports usage in both chars and estimated tokens.
+Raise `OPENCODE_WIKI_TOC_SHARE`, pin `OPENCODE_WIKI_TOC_BUDGET`, or consolidate
+and prune to reclaim space.
 
 ## Configuration
 
 - `OPENCODE_WIKI_DIR` — wiki location (default `~/wiki`).
-- `OPENCODE_WIKI_TOC_BUDGET` — max chars for the injected index
-  (default `60000`).
+- `OPENCODE_WIKI_TOC_SHARE` — share of the model's context window the index may
+  use (default `0.1` = 10%; max `0.5`).
+- `OPENCODE_WIKI_TOC_BUDGET` — pin the index to a fixed char count, disabling
+  context-based scaling. Only needed to override the default behaviour.
 - **Git (optional)** — if the wiki dir is a git repo, every write is committed
   (`git init ~/wiki` to enable; skip it and nothing changes).
 - **Obsidian (optional)** — open the wiki dir as a vault to browse/search/graph it.
@@ -240,6 +255,24 @@ npm run build        # Build to dist/
 ## Changelog
 
 Newest first, stamped in UTC. See `git log` for full detail.
+
+### 2026-08-03T20:53Z — index budget scales with the model's context window
+
+- The index budget is no longer a fixed character count. It is now **10% of
+  the model's context window** (`OPENCODE_WIKI_TOC_SHARE`), computed per
+  session from the model passed to the injection hook. A 1M-token model gets
+  325,000 chars / ~100,000 tokens (~2,000 pages); a 200K model gets 65,000
+  chars / ~20,000 tokens (~400 pages). Verified at exactly 10.0% across 32K,
+  128K, 200K, 1M and 2M windows.
+  - Reported by users hitting the old 60,000-char cap on large-context models,
+    where a fixed budget wasted the majority of an affordable index.
+  - Char↔token math uses 3.25 chars/token — deliberately conservative, since
+    hyphenated technical slugs tokenize denser than prose, so real cost lands
+    at or under the configured share.
+  - 60,000-char fallback still applies when the context window is unknown;
+    `OPENCODE_WIKI_TOC_BUDGET` pins a fixed size and disables scaling.
+- `memory_status` now reports index usage in chars **and** estimated tokens,
+  as a percentage of budget, and names the context window it scaled from.
 
 ### 2026-08-02T20:02Z — status/index consistency
 

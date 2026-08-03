@@ -27,16 +27,67 @@ export interface WikiPage {
 export const MAX_BODY_LINES = 150
 
 /**
- * Character budget for the injected TOC. A page missing from the TOC is
- * effectively invisible — the model never learns it exists — so this is sized
- * for discoverability, not token thrift: ~60K chars (~15K tokens) holds roughly
- * 350 pages. Override with OPENCODE_WIKI_TOC_BUDGET if a wiki outgrows it;
- * memory_status warns whenever anything is omitted.
+ * Share of the model's context window the injected index may occupy.
+ * Override with OPENCODE_WIKI_TOC_SHARE (e.g. 0.15 for 15%).
+ */
+export const TOC_CONTEXT_SHARE = (() => {
+  const raw = Number(process.env["OPENCODE_WIKI_TOC_SHARE"])
+  return Number.isFinite(raw) && raw > 0 && raw <= 0.5 ? raw : 0.1
+})()
+
+/**
+ * Chars per token for budget math. Deliberately conservative: index lines are
+ * hyphenated technical slugs ("elasticsearch-indexing-pressure") which tokenize
+ * far denser than prose's ~4 chars/token, so 3.25 keeps the real token cost at
+ * or below the configured share rather than overshooting it.
+ */
+const CHARS_PER_TOKEN = 3.25
+
+/** Absolute floor so a small-context model still gets a usable index */
+const TOC_CHAR_FLOOR = 8_000
+
+/**
+ * Fallback budget when the model's context window is unknown (~15K tokens).
+ * An explicit OPENCODE_WIKI_TOC_BUDGET pins the budget and disables scaling.
  */
 export const TOC_CHAR_BUDGET = (() => {
   const raw = Number(process.env["OPENCODE_WIKI_TOC_BUDGET"])
   return Number.isFinite(raw) && raw > 1000 ? raw : 60_000
 })()
+
+/**
+ * Budget for the injected index, scaled to the model actually in use.
+ * A page missing from the index is invisible — the model never learns it
+ * exists — so this is sized for discoverability, not token thrift:
+ *
+ *   1M context   -> 100K tokens -> ~325,000 chars (~2,000 pages)
+ *   200K context ->  20K tokens ->  ~65,000 chars   (~400 pages)
+ *   32K context  -> 3.2K tokens ->  ~10,400 chars    (~65 pages)
+ *
+ * memory_status reports usage and warns loudly if anything is ever omitted.
+ */
+export function tocBudgetFor(contextLimitTokens?: number): number {
+  if (process.env["OPENCODE_WIKI_TOC_BUDGET"]) return TOC_CHAR_BUDGET
+  if (!contextLimitTokens || !Number.isFinite(contextLimitTokens) || contextLimitTokens <= 0) {
+    return TOC_CHAR_BUDGET
+  }
+  const scaled = Math.floor(contextLimitTokens * TOC_CONTEXT_SHARE * CHARS_PER_TOKEN)
+  return Math.max(TOC_CHAR_FLOOR, scaled)
+}
+
+/** Approximate token cost of a rendered index */
+export function approxTokens(chars: number): number {
+  return Math.round(chars / CHARS_PER_TOKEN)
+}
+
+/** Budget and context window last used by the injection hook (for memory_status) */
+let lastUsed = { budget: TOC_CHAR_BUDGET, contextTokens: 0 }
+export function setLastUsedBudget(budget: number, contextTokens: number): void {
+  lastUsed = { budget, contextTokens }
+}
+export function getLastUsedBudget(): { budget: number; contextTokens: number } {
+  return lastUsed
+}
 
 /**
  * Wiki root directory. Overridable via OPENCODE_WIKI_DIR, defaults to ~/wiki.
@@ -254,9 +305,10 @@ export function findProjectPage(directory: string, pages?: WikiPage[]): WikiPage
  * knowledge undiscoverable unless a keyword search happened to hit it.
  * Discoverability beats token thrift.
  */
-export function deriveTOC(pages?: WikiPage[]): string {
+export function deriveTOC(pages?: WikiPage[], budgetChars?: number): string {
   const all = pages ?? listPages()
   if (all.length === 0) return ""
+  const budget = budgetChars ?? TOC_CHAR_BUDGET
 
   const bySlug = (a: WikiPage, b: WikiPage) => a.relPath.localeCompare(b.relPath)
   const topics = all.filter((p) => p.type === "Topic").sort(bySlug)
@@ -280,7 +332,7 @@ export function deriveTOC(pages?: WikiPage[]): string {
   // never strand budget that a large one could use. (A naive equal split
   // truncated topics at 1/3 of the budget while total usage sat well under it.)
   const allocations = new Map<string, number>()
-  let remaining = TOC_CHAR_BUDGET
+  let remaining = budget
   const ordered = [...sections].sort(
     (a, b) => need(a.header, a.lines) - need(b.header, b.lines)
   )
@@ -321,9 +373,9 @@ function need(header: string, lines: string[]): number {
 }
 
 /** Number of pages omitted from the derived TOC (0 when everything fits) */
-export function tocTruncationCount(pages?: WikiPage[]): number {
+export function tocTruncationCount(pages?: WikiPage[], budgetChars?: number): number {
   const all = pages ?? listPages()
-  const shown = deriveTOC(all).split("\n").filter((l) => l.startsWith("- ")).length
+  const shown = deriveTOC(all, budgetChars).split("\n").filter((l) => l.startsWith("- ")).length
   return Math.max(0, all.length - shown)
 }
 

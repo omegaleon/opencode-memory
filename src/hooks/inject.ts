@@ -1,5 +1,5 @@
 import type { Hooks, PluginInput } from "@opencode-ai/plugin"
-import { listPages, deriveTOC, findProjectPage } from "../lib/wiki.js"
+import { listPages, deriveTOC, findProjectPage, tocBudgetFor, setLastUsedBudget } from "../lib/wiki.js"
 import { readState } from "../lib/state.js"
 
 /** Cap on the injected project overview (chars) — overviews are size-capped
@@ -20,12 +20,19 @@ const SCAN_TTL_MS = 60_000
  * Everything else is pulled on demand via memory_recall.
  */
 export function createInjectHook(directory: string): Hooks["experimental.chat.system.transform"] {
-  let cached: { toc: string; overview: string } | null = null
+  let cached: { toc: string; overview: string; budget: number } | null = null
   let cachedAt = 0
 
-  return async (_input, output) => {
+  return async (input, output) => {
     try {
-      if (!cached || Date.now() - cachedAt > SCAN_TTL_MS) {
+      // Index budget scales with the model actually in use (10% of its context
+      // window by default), so a 1M-token model gets a far larger index than a
+      // 200K one instead of both sharing one hardcoded number.
+      const contextTokens = (input as any)?.model?.limit?.context ?? 0
+      const budget = tocBudgetFor(contextTokens)
+      setLastUsedBudget(budget, contextTokens)
+
+      if (!cached || cached.budget !== budget || Date.now() - cachedAt > SCAN_TTL_MS) {
         const pages = listPages()
 
         // Investigations whose reusable technique has been promoted into
@@ -37,7 +44,7 @@ export function createInjectHook(directory: string): Hooks["experimental.chat.sy
         const demoted = pages.filter((p) => p.type === "Investigation" && consolidated.has(p.relPath))
         const indexPages = pages.filter((p) => !demoted.includes(p))
 
-        let toc = deriveTOC(indexPages)
+        let toc = deriveTOC(indexPages, budget)
         if (toc && demoted.length > 0) {
           toc +=
             `\n(${demoted.length} older investigation(s) not listed — their reusable technique ` +
@@ -50,7 +57,7 @@ export function createInjectHook(directory: string): Hooks["experimental.chat.sy
             `[MEMORY] Project context for ${project.codePath} (${project.relPath}):\n` +
             truncate(project.body, OVERVIEW_CHAR_CAP)
         }
-        cached = { toc, overview }
+        cached = { toc, overview, budget }
         cachedAt = Date.now()
       }
 

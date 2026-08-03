@@ -5,7 +5,9 @@ import {
   getWikiDir,
   tocTruncationCount,
   findDuplicates,
-  TOC_CHAR_BUDGET,
+  getLastUsedBudget,
+  approxTokens,
+  TOC_CONTEXT_SHARE,
 } from "../lib/wiki.js"
 import { readState } from "../lib/state.js"
 import { openDb, listHistorySessions } from "../lib/db.js"
@@ -117,22 +119,30 @@ export function createMemoryStatusTool() {
       // counting them here would over-report omissions.
       const indexPages = pages.filter((p) => !(p.type === "Investigation" && consolidated.has(p.relPath)))
       const demoted = pages.length - indexPages.length
-      const toc = deriveTOC(indexPages)
-      const omitted = tocTruncationCount(indexPages)
+      const { budget, contextTokens } = getLastUsedBudget()
+      const toc = deriveTOC(indexPages, budget)
+      const omitted = tocTruncationCount(indexPages, budget)
+      const pct = Math.round((toc.length / budget) * 100)
+
       lines.push(
         "",
-        `Injected index: ${toc.length} chars of a ${TOC_CHAR_BUDGET} budget, ` +
-          `${indexPages.length} page(s) listed` +
+        `Injected index: ${toc.length.toLocaleString()} chars (~${approxTokens(toc.length).toLocaleString()} tokens) ` +
+          `of a ${budget.toLocaleString()} char (~${approxTokens(budget).toLocaleString()} token) budget — ${pct}% used.`,
+        contextTokens > 0
+          ? `Budget is ${Math.round(TOC_CONTEXT_SHARE * 100)}% of this model's ${contextTokens.toLocaleString()}-token context window.`
+          : `Budget is the static fallback (model context window unknown).`,
+        `${indexPages.length} page(s) listed` +
           (demoted > 0
-            ? ` (${demoted} consolidated investigation(s) excluded — their technique is in topics, ` +
-              `originals still searchable).`
-            : ".") +
-          (omitted > 0
-            ? ` WARNING: ${omitted} page(s) omitted — they exist but the model never sees them ` +
-              `in the index (only findable via memory_recall search). Raise the budget with ` +
-              `OPENCODE_WIKI_TOC_BUDGET, or prune duplicates.`
-            : " All listed pages fit.")
+            ? `; ${demoted} consolidated investigation(s) excluded — their technique is in topics, originals still searchable.`
+            : ".")
       )
+      if (omitted > 0) {
+        lines.push(
+          `WARNING: ${omitted} page(s) omitted — they exist but the model never sees them in ` +
+            `the index (only findable via memory_recall search). Raise OPENCODE_WIKI_TOC_SHARE, ` +
+            `set OPENCODE_WIKI_TOC_BUDGET, consolidate, or prune duplicates.`
+        )
+      }
 
       return lines.join("\n")
     },
