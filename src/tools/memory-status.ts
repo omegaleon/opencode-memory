@@ -5,6 +5,7 @@ import {
   getWikiDir,
   tocTruncationCount,
   findDuplicates,
+  findProjectPage,
   getLastUsedBudget,
   approxTokens,
   TOC_CONTEXT_SHARE,
@@ -13,8 +14,9 @@ import { readState } from "../lib/state.js"
 import { openDb, listHistorySessions } from "../lib/db.js"
 import { isJobRunning, activeJobKind } from "../lib/job-runner.js"
 import { isGitRepo, getLastGitError } from "../lib/git.js"
+import { getLastInjectedChars } from "../hooks/inject.js"
 
-export function createMemoryStatusTool() {
+export function createMemoryStatusTool(directory: string) {
   return tool({
     description:
       "Report the health of the persistent memory wiki: page counts by type, most " +
@@ -125,17 +127,35 @@ export function createMemoryStatusTool() {
       const omitted = tocTruncationCount(indexPages, budget)
       const pct = Math.round((toc.length / budget) * 100)
 
+      // Full per-request cost of this plugin: index + matched project overview
+      const project = findProjectPage(directory, pages)
+      const overviewChars = project ? Math.min(project.body.length, 6_000) + 100 : 0
+      const totalChars = toc.length + overviewChars
+      const totalTokens = approxTokens(totalChars)
+
       lines.push(
         "",
-        `Injected index: ${toc.length.toLocaleString()} chars (~${approxTokens(toc.length).toLocaleString()} tokens) ` +
-          `of a ${budget.toLocaleString()} char (~${approxTokens(budget).toLocaleString()} token) budget — ${pct}% used.`,
-        contextTokens > 0
-          ? `Budget is ${Math.round(TOC_CONTEXT_SHARE * 100)}% of this model's ${contextTokens.toLocaleString()}-token context window.`
-          : `Budget is the static fallback (model context window unknown).`,
-        `${indexPages.length} page(s) listed` +
-          (demoted > 0
-            ? `; ${demoted} consolidated investigation(s) excluded — their technique is in topics, originals still searchable.`
-            : ".")
+        "PER-REQUEST COST OF THIS PLUGIN (injected into every message):",
+        `- Index:            ${toc.length.toLocaleString()} chars  (~${approxTokens(toc.length).toLocaleString()} tokens), ${indexPages.length} page(s) listed`,
+        project
+          ? `- Project overview: ${overviewChars.toLocaleString()} chars  (~${approxTokens(overviewChars).toLocaleString()} tokens) — ${project.relPath}`
+          : `- Project overview: none (cwd matches no project page)`,
+        `- TOTAL:            ${totalChars.toLocaleString()} chars  (~${totalTokens.toLocaleString()} tokens)` +
+          (contextTokens > 0
+            ? ` = ${((totalTokens / contextTokens) * 100).toFixed(1)}% of this model's ${contextTokens.toLocaleString()}-token window`
+            : ""),
+        `- Last actually injected: ${getLastInjectedChars().toLocaleString()} chars` +
+          (getLastInjectedChars() > totalChars * 1.5
+            ? "  <-- LARGER THAN EXPECTED: the host may be re-injecting; report this."
+            : ""),
+        "",
+        `Index budget: ${budget.toLocaleString()} chars (~${approxTokens(budget).toLocaleString()} tokens), ${pct}% used.` +
+          (contextTokens > 0
+            ? ` Derived from ${Math.round(TOC_CONTEXT_SHARE * 100)}% of the context window, capped.`
+            : " (static fallback — model context unknown)"),
+        demoted > 0
+          ? `${demoted} consolidated investigation(s) excluded from the index — technique is in topics, originals still searchable.`
+          : ""
       )
       // Version control — the recovery path when a write goes wrong
       const gitError = getLastGitError()

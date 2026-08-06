@@ -9,6 +9,15 @@ const OVERVIEW_CHAR_CAP = 6_000
 /** Re-scan the wiki at most this often — readdir is cheap but not free */
 const SCAN_TTL_MS = 60_000
 
+/** Identifies our block in the system array (idempotence + diagnostics) */
+const INDEX_MARKER = "[MEMORY] Persistent wiki index:\n"
+
+/** Chars actually injected on the last request — reported by memory_status */
+let lastInjectedChars = 0
+export function getLastInjectedChars(): number {
+  return lastInjectedChars
+}
+
 /**
  * Inject the always-available memory surface into the system prompt:
  * 1. The derived TOC (one line per topic/project, hard character budget)
@@ -71,18 +80,24 @@ export function createInjectHook(directory: string): Hooks["experimental.chat.sy
         cachedAt = Date.now()
       }
 
-      if (cached.toc) {
-        output.system.push(
-          "[MEMORY] Persistent wiki index:\n" +
+      // Idempotence guard: if the host reuses the system array across turns,
+      // an unconditional push would re-inject the whole index every request
+      // and compound it. Never assume the array is fresh.
+      const alreadyInjected = output.system.some((s) => s.startsWith(INDEX_MARKER))
+
+      if (cached.toc && !alreadyInjected) {
+        const block =
+          INDEX_MARKER +
           cached.toc +
           "\nIf the current task involves any topic listed above, load that page with " +
           "memory_recall BEFORE answering — wiki pages contain environment-specific " +
           "details (exact endpoints, gotchas, access patterns) that override general " +
           "knowledge. Also check relevant pages before claiming you lack knowledge or " +
           "access for a task (credentials, APIs, debugging steps, deployment details)."
-        )
+        output.system.push(block)
+        lastInjectedChars = block.length + cached.overview.length
       }
-      if (cached.overview) {
+      if (cached.overview && !alreadyInjected) {
         output.system.push(cached.overview)
       }
     } catch {

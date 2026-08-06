@@ -219,6 +219,8 @@ and prune to reclaim space.
 
 - `OPENCODE_WIKI_DIR` — wiki location (default `~/wiki`).
 - `OPENCODE_WIKI_GIT` — set to `0` to disable automatic git init/commit of the wiki.
+- `OPENCODE_WIKI_TOC_CEILING` — optional absolute cap (chars) on the injected index.
+- `OPENCODE_WIKI_TOC_DESC_CHARS` — optional clip for descriptions on index lines only.
 - `OPENCODE_WIKI_TOC_SHARE` — share of the model's context window the index may
   use (default `0.1` = 10%; max `0.5`).
 - `OPENCODE_WIKI_TOC_BUDGET` — pin the index to a fixed char count, disabling
@@ -265,6 +267,39 @@ fixture for every defect found in the wild.
 ## Changelog
 
 Newest first, stamped in UTC. See `git log` for full detail.
+
+### 2026-08-06T14:38Z — injection cost instrumentation
+
+Prompted by a report of ~25% context consumed early in a session. No sizing
+defaults were changed — this adds the measurement needed to find out where the
+tokens actually go, rather than tuning on a guess.
+
+- **Idempotence guard on injection.** The system-prompt hook pushed its block
+  unconditionally; if the host reuses the system array across turns, the index
+  would be re-injected and compound every request. The block is now tagged and
+  skipped if already present.
+- **`memory_status` reports the plugin's real per-request cost** — index chars
+  and tokens, project-overview chars and tokens, the total as a percentage of
+  the model's context window, and the size actually injected on the last
+  request (flagged if noticeably larger than expected, which would indicate
+  host-side re-injection).
+- Two knobs added but **disabled by default**, so behaviour is unchanged:
+  `OPENCODE_WIKI_TOC_CEILING` (absolute cap on the index) and
+  `OPENCODE_WIKI_TOC_DESC_CHARS` (clip descriptions on index lines only; the
+  page keeps its full description).
+
+Measured index cost at realistic description lengths, for reference when
+reading `memory_status` output:
+
+```
+|  pages | index chars | ~tokens | % of a 1M window |
+|--------|-------------|---------|------------------|
+|    150 |      18,057 |   5,556 |             0.6% |
+|    300 |      36,057 |  11,094 |             1.1% |
+|    600 |      72,057 |  22,171 |             2.2% |
+|  1,200 |     144,057 |  44,325 |             4.4% |
+|  2,000 |     240,057 |  73,864 |             7.4% |
+```
 
 ### 2026-08-03T21:46Z — silent data loss fixes + regression suite
 

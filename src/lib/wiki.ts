@@ -63,6 +63,26 @@ const CHARS_PER_TOKEN = 3.25
 const TOC_CHAR_FLOOR = 8_000
 
 /**
+ * Optional ceiling on the injected index. Unset by default — the budget is
+ * whatever the configured share of the context window works out to. Set
+ * OPENCODE_WIKI_TOC_CEILING to cap it.
+ */
+const TOC_CHAR_CEILING = (() => {
+  const raw = Number(process.env["OPENCODE_WIKI_TOC_CEILING"])
+  return Number.isFinite(raw) && raw > 1000 ? raw : Number.POSITIVE_INFINITY
+})()
+
+/**
+ * Optional max description length on a TOC line. Unset by default — the full
+ * description is carried. Set OPENCODE_WIKI_TOC_DESC_CHARS to clip it, which
+ * trades index detail for how many pages fit.
+ */
+export const TOC_DESC_CHARS = (() => {
+  const raw = Number(process.env["OPENCODE_WIKI_TOC_DESC_CHARS"])
+  return Number.isFinite(raw) && raw >= 40 ? raw : Number.POSITIVE_INFINITY
+})()
+
+/**
  * Fallback budget when the model's context window is unknown (~15K tokens).
  * An explicit OPENCODE_WIKI_TOC_BUDGET pins the budget and disables scaling.
  */
@@ -88,7 +108,7 @@ export function tocBudgetFor(contextLimitTokens?: number): number {
     return TOC_CHAR_BUDGET
   }
   const scaled = Math.floor(contextLimitTokens * TOC_CONTEXT_SHARE * CHARS_PER_TOKEN)
-  return Math.max(TOC_CHAR_FLOOR, scaled)
+  return Math.min(TOC_CHAR_CEILING, Math.max(TOC_CHAR_FLOOR, scaled))
 }
 
 /** Approximate token cost of a rendered index */
@@ -457,7 +477,7 @@ export function deriveTOC(pages?: WikiPage[], budgetChars?: number): string {
     .filter((s) => s.pages.length > 0)
     .map((s) => ({
       ...s,
-      lines: s.pages.map((p) => `- ${tocSlug(p)}: ${p.description}\n`),
+      lines: s.pages.map((p) => `- ${tocSlug(p)}: ${trimDesc(p.description)}\n`),
     }))
 
   // Max-min fair allocation: sections that need less than an equal share take
@@ -503,6 +523,14 @@ export function deriveTOC(pages?: WikiPage[], budgetChars?: number): string {
 /** Characters a section needs to render in full */
 function need(header: string, lines: string[]): number {
   return header.length + 1 + lines.reduce((sum, l) => sum + l.length, 0)
+}
+
+/** Clip a description for its TOC line, on a word boundary where possible */
+function trimDesc(description: string): string {
+  if (description.length <= TOC_DESC_CHARS) return description
+  const slice = description.slice(0, TOC_DESC_CHARS - 1)
+  const lastSpace = slice.lastIndexOf(" ")
+  return (lastSpace > TOC_DESC_CHARS - 30 ? slice.slice(0, lastSpace) : slice).trimEnd() + "…"
 }
 
 /** Number of pages omitted from the derived TOC (0 when everything fits) */

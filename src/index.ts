@@ -29,7 +29,7 @@ export const MemoryPlugin: Plugin = async ({ client, directory }) => {
       memory_write: createMemoryWriteTool(),
       memory_bootstrap: createMemoryBootstrapTool(client),
       memory_consolidate: createMemoryConsolidateTool(client, directory),
-      memory_status: createMemoryStatusTool(),
+      memory_status: createMemoryStatusTool(directory),
       memory_prune: createMemoryPruneTool(),
     },
 
